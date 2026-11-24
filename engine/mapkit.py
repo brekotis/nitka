@@ -1,5 +1,5 @@
 """Рендер карт для отчёта: тайловая основа + векторные слои + зарамочное оформление."""
-import math, os, io, json, bisect, threading, urllib.request, urllib.error
+import math, os, io, json, time, bisect, threading, urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
@@ -48,16 +48,19 @@ _lock = threading.Lock()
 
 def get_tile(layer, z, x, y):
     path = os.path.join(CACHE, 'tiles', layer, str(z), str(x), f'{y}.png')
-    if os.path.exists(path):
-        return _rgb(Image.open(path)) if os.path.getsize(path) > 0 else None
-    data = fetch_tile(layer, z, x, y)
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        return _rgb(Image.open(path))
+    data = fetch_tile(layer, z, x, y)      # пустая пометка «тайла нет» разбирается там же (у неё есть срок годности)
     return _rgb(Image.open(io.BytesIO(data))) if data else None
 
 def fetch_tile(layer, z, x, y, timeout=30, tries=3):
     """Скачивает тайл в кэш; возвращает байты, b'' — тайла точно нет, None — сервер карты не ответил (в кэш не пишется)."""
     path = os.path.join(CACHE, 'tiles', layer, str(z), str(x), f'{y}.png')
     if os.path.exists(path):
-        with open(path, 'rb') as f: return f.read()
+        # пометка «тайла нет» не вечна. OpenTopoMap рисует крупный зум по запросу: сначала отвечает 404,
+        # а через несколько минут тайл уже есть — поэтому у него пометка живёт четверть часа, у остальных слоёв — две недели
+        if os.path.getsize(path) or time.time() - os.path.getmtime(path) < (900 if layer == 'otm' else 14 * 86400):
+            with open(path, 'rb') as f: return f.read()
     url, tms = LAYERS[layer]
     if not (0 <= x < 2 ** z and 0 <= y < 2 ** z): return b''
     yy = (2 ** z - 1 - y) if tms else y
@@ -149,12 +152,18 @@ class View:
             if acc is None: return xy, None, None
             out = Image.new('RGBA', (256, 256), (255, 255, 255, 255))
             return xy, Image.alpha_composite(out, acc).convert('RGB'), used
-        with ThreadPoolExecutor(6) as ex:
-            for (x, y), im, li in ex.map(job, jobs):
-                if im is not None:
-                    mosaic.paste(im, ((x - tx0) * 256, (y - ty0) * 256))
-                    use[li] = use.get(li, 0) + 1
-                    if li: missing.append((x, y, li))
+        holes = []
+        for attempt in range(2):
+            with ThreadPoolExecutor(6) as ex:
+                for (x, y), im, li in ex.map(job, jobs):
+                    if im is not None:
+                        mosaic.paste(im, ((x - tx0) * 256, (y - ty0) * 256))
+                        use[li] = use.get(li, 0) + 1
+                        if li: missing.append((x, y, li))
+                    else: holes.append((x, y))
+            if not holes or attempt: break
+            jobs, holes = holes, []; time.sleep(3)      # сервер карты мог не ответить — ещё одна попытка для пустых мест
+        self.holes = len(holes)
         self.fallback_tiles = missing
         self.layer_use = use
         crop = mosaic.crop((int(X0 - tx0 * 256), int(Y0 - ty0 * 256), int(math.ceil(X1 - tx0 * 256)), int(math.ceil(Y1 - ty0 * 256))))

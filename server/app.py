@@ -552,6 +552,11 @@ class H(BaseHTTPRequestHandler):
         w[1] += 1
         if w[1] > 6000: raise Err(429, 'Слишком много запросов карты — подождите несколько минут.')
         data = mapkit.fetch_tile(layer, z, x, y, timeout=12, tries=2)
+        if data == b'' and layer == 'otm':
+            # OpenTopoMap рисует крупный зум по запросу: «нет тайла» у него значит «ещё не готов» — показываем зум помельче и скоро спросим снова
+            up = self.overzoom(layer, z, x, y)
+            if up: return self.send(200, up, 'image/png', cache='public, max-age=600')
+            return self.send(200, BLANK_PNG, 'image/png', cache='public, max-age=600')
         if data == b'': return self.send(200, BLANK_PNG, 'image/png', cache='public, max-age=86400')       # тайла нет вовсе
         if data is None:
             # сервер карты не ответил: показываем увеличенный кусок более мелкого зума и просим браузер спросить ещё раз

@@ -77,7 +77,8 @@ class Builder:
     def style(self, sc):
         if self.base == 'otm' or sc >= 1000000:
             z = {10000: 17, 25000: 16, 50000: 15, 100000: 14, 200000: 13, 300000: 12, 500000: 11, 1000000: 10, 2000000: 9, 2500000: 8, 5000000: 7}[sc]
-            return dict(layers=['otm'], z=z, src='Основа: OpenTopoMap (© OpenStreetMap, SRTM).', lighten=0.14 if sc < 1000000 else 0.22, shade=0.0, shade_z=12)
+            # OpenTopoMap отдаёт крупный зум не везде (на севере и в глуши — 404): тогда берём тайл помельче и увеличиваем
+            return dict(layers=['otm'] + [('otm', z - k) for k in (1, 2, 3, 4) if z - k >= 6], z=z, src='Основа: OpenTopoMap (© OpenStreetMap, SRTM).', lighten=0.14 if sc < 1000000 else 0.22, shade=0.0, shade_z=12)
         tab = {
             10000: ([('gsh050', 15), ('gsh100', 14), ('topo500', 14), ('otm', 15)], 17, '1:50 000', 13),
             25000: ([('gsh050', 15), ('gsh100', 14), ('topo500', 14), ('otm', 15)], 16, '1:50 000', 13),
@@ -88,6 +89,8 @@ class Builder:
             500000: (['ggc500', ('ggc1000', 11), 'otm'], 12, '1:500 000', 10),
         }
         layers, z, name, sz = tab[sc]
+        zo = min(z, 15)      # последний запасной слой — OpenTopoMap; под ним — он же, но мельче
+        layers = layers + [('otm', zo - k) for k in (1, 2, 3) if zo - k >= 6]
         return dict(layers=layers, z=z, src=f'Основа: топокарта Генштаба {name} (nakarte.me), отмывка рельефа — по ЦМР.', lighten=0.16 if sc <= 100000 else 0.22,
                     shade=0.34 if sc <= 100000 else 0.38, shade_z=sz)
 
@@ -96,10 +99,14 @@ class Builder:
         img = v.basemap(s['layers'], s['z'], lighten=s['lighten'], shade=s['shade'], shade_z=s['shade_z'])
         use = getattr(v, 'layer_use', {}); tot = sum(use.values()) or 1
         names = [L if isinstance(L, str) else L[0] for L in s['layers']]
-        if len(names) > 1 and names[-1] == 'otm' and use.get(len(names) - 1, 0) > 0.6 * tot:
+        # основа целиком из OpenTopoMap, но часть тайлов пришлось взять мельче — он их ещё дорисовывает
+        v.soft = len(getattr(v, 'fallback_tiles', [])) if names[0] == 'otm' else 0
+        otm_use = sum(n for i, n in use.items() if i is not None and names[i] == 'otm')
+        if names[0] != 'otm' and otm_use > 0.6 * tot:
             # топокарт Генштаба на этот район нет — весь поход рисуем на OpenTopoMap, без двойной отмывки
             self.base = 'otm'; s = self.style(sc)
             img = v.basemap(s['layers'], s['z'], lighten=s['lighten'], shade=s['shade'], shade_z=s['shade_z'])
+            v.soft = len(getattr(v, 'fallback_tiles', []))
         elif len(names) > 1 and use.get(0, 0) < 0.5 * tot and 'Генштаба' in s['src']:
             s = dict(s, src='Основа: топокарты Генштаба разных масштабов (nakarte.me), отмывка рельефа — по ЦМР.')
         return img, s
@@ -468,7 +475,8 @@ class Builder:
         p = self._file(sid); sh.save(p); v = sh.v
         size = (self.o.get('logo', True) and stamp_logo(p)) or sh.size_cm
         frame = dict(lat=round(v.lat0, 6), lon=round(v.lon0, 6), scale=v.scale, fw=round(v.W / mk.DPI * 2.54, 2), fh=round(v.H / mk.DPI * 2.54, 2), manual=bool(self.adj(sid)))
-        return dict(file=p, w_cm=size[0], h_cm=size[1], note=note + (' · рамка вручную' if self.adj(sid) else ''), frame=frame)
+        return dict(file=p, w_cm=size[0], h_cm=size[1], note=note + (' · рамка вручную' if self.adj(sid) else '') + (' · часть основы не загрузилась — пересобери лист' if getattr(v, 'holes', 0)
+                                else ' · часть основы пока мелкая: OpenTopoMap дорисовывает этот район, через 15–20 минут пересобери лист' if getattr(v, 'soft', 0) else ''), frame=frame)
 
     def adj(self, sid):
         """Ручная правка рамки листа: dict(lat, lon, scale) — всё необязательно."""
