@@ -85,6 +85,7 @@ async function route() {
 }
 // ---------------------------------------------------------------- «Кто пользуется» — только для администратора, под отдельным кодом
 async function renderAdmin() {
+  destroyAtlas();
   document.title = 'Нитка — кто пользуется';
   const bar = topBar(`<span class="sp"></span><button class="btn ghost sm" data-a="home">← Мои походы</button>`);
   let st; try { st = await api('GET', '/api/admin/state'); } catch (e) { fail(e); return go('#/'); }
@@ -122,27 +123,64 @@ function render() {
 }
 
 // ---------------------------------------------------------------- вход
+// ---- сцена на экране входа: время суток по часам посетителя, слои едут за курсором, турист отвечает на клик
+const TODS = ['dawn', 'day', 'dusk', 'night'];
+const todNow = () => { const h = new Date().getHours(); return h >= 5 && h < 8 ? 'dawn' : h >= 8 && h < 18 ? 'day' : h >= 18 && h < 22 ? 'dusk' : 'night'; };
+const PHRASES = ['Ещё чуть-чуть — и перевал!', 'Скоро привал. Честно.', 'Там, за поворотом, уже видно.', '2Б или не 2Б — вот в чём вопрос.', 'Кто нёс верёвку?', 'Нитку не теряем!', 'А карты кто-нибудь распечатал?', 'Рюкзак сам себя не понесёт.', 'Здесь должна была быть тропа…', 'Дежурные, подъём!'];
+// Турист говорит сам (вскоре после появления, потом раз в 9–14 секунд) и по клику — тогда ещё и подпрыгивает
+function talker(h, b, phrases, first = 2600) {
+  if (!h || !b || !phrases.length) return;
+  let n = Math.floor(Math.random() * phrases.length), hideT = 0, autoT = 0;
+  const say = hop => {
+    if (!h.isConnected) return clearTimeout(autoT);
+    b.textContent = phrases[n++ % phrases.length]; b.hidden = false; b.classList.remove('in'); void b.offsetWidth; b.classList.add('in');
+    if (hop) { h.classList.remove('hop'); void h.offsetWidth; h.classList.add('hop'); }
+    clearTimeout(hideT); hideT = setTimeout(() => { b.hidden = true; }, 4800);
+    clearTimeout(autoT); autoT = setTimeout(() => say(false), 9000 + Math.random() * 5000);
+  };
+  h.onclick = () => say(true);
+  autoT = setTimeout(() => say(false), first);
+}
+function sceneLive() {
+  const sc = $('#scene'); if (!sc) return;
+  const layers = $$('[data-d]', sc); let tx = 0, ty = 0, cx = 0, cy = 0, raf = 0;
+  const tick = () => {
+    cx += (tx - cx) * 0.08; cy += (ty - cy) * 0.08;
+    layers.forEach(l => { const d = +l.dataset.d; l.style.transform = `translate(${(-cx * d * 0.5).toFixed(2)}px, ${(-cy * d * 0.28).toFixed(2)}px)`; });
+    raf = Math.abs(tx - cx) + Math.abs(ty - cy) > 0.002 ? requestAnimationFrame(tick) : 0;
+  };
+  const move = e => { if (!sc.isConnected) return window.removeEventListener('pointermove', move); tx = e.clientX / innerWidth * 2 - 1; ty = e.clientY / innerHeight * 2 - 1; if (!raf) raf = requestAnimationFrame(tick); };
+  if (matchMedia('(hover: hover) and (prefers-reduced-motion: no-preference)').matches) window.addEventListener('pointermove', move);
+  $('#tod').onclick = () => { const cur = TODS.find(t => sc.classList.contains('t-' + t)); sc.classList.remove('t-' + cur); sc.classList.add('t-' + TODS[(TODS.indexOf(cur) + 1) % 4]); };
+  const orb = $('.orb', sc); if (orb) orb.addEventListener('click', () => $('#tod').click());
+  talker($('#hiker'), $('#bubble'), PHRASES);
+}
 function renderLogin() {
   document.title = 'Нитка — карты похода';
   app.innerHTML = `<div class="login">
-    <div class="scene">
+    <div class="scene t-${todNow()}" id="scene">
       <svg viewBox="0 0 800 900" preserveAspectRatio="xMidYMax slice" aria-hidden="true">
-        <circle class="sun" cx="610" cy="190" r="78" fill="#FEBC0E"/>
-        <g class="cloud" fill="#fff" opacity=".92"><ellipse cx="80" cy="150" rx="70" ry="22"/><ellipse cx="130" cy="132" rx="46" ry="24"/><ellipse cx="40" cy="138" rx="34" ry="16"/></g>
-        <g class="cloud" fill="#fff" opacity=".75" style="animation-duration:95s;animation-delay:-40s"><ellipse cx="30" cy="290" rx="58" ry="16"/><ellipse cx="72" cy="276" rx="36" ry="17"/></g>
-        <path d="M-20 560C60 500 110 380 190 380s110 110 180 70 90-170 170-170 120 160 180 190 80-40 120-30V900H-20Z" fill="#9CCBEB"/>
-        <path d="M512 296c12-10 34-18 50-6 22 16 30 48 42 70-22-14-40 4-58-6s-26-30-34-58Z" fill="#fff"/>
-        <path d="M-20 680C50 640 120 500 220 500s120 120 190 90 110-130 190-130 150 150 220 170V900H-20Z" fill="#2E7DBE"/>
-        <path d="M188 506c16-8 42-10 60 0 24 14 34 40 48 60-26-12-44 6-64-4s-30-32-44-56Z" fill="#fff"/>
-        <path d="M-20 790C80 760 150 640 260 640s150 110 240 100 130-110 210-110 90 60 110 70V900H-20Z" fill="#133C6A"/>
-        <path d="M-20 850c150-40 300-20 460-34s250-34 380-20V900H-20Z" fill="#fff"/>
-        <path class="thread" d="M300 846C370 800 250 720 262 648c60-6 110 90 236 92 50-36 76-100 124-108" fill="none" stroke="#fff" stroke-width="13" stroke-linecap="round"/>
-        <path class="thread" d="M300 846C370 800 250 720 262 648c60-6 110 90 236 92 50-36 76-100 124-108" fill="none" stroke="#E2001A" stroke-width="6" stroke-linecap="round"/>
-        <path class="pop" style="animation-delay:1.500s" d="M262 620l17 28h-34Z" fill="#FEBC0E" stroke="#133C6A" stroke-width="3" stroke-linejoin="round"/>
-        <path class="pop" style="animation-delay:2.300s" d="M498 712l17 28h-34Z" fill="#FEBC0E" stroke="#133C6A" stroke-width="3" stroke-linejoin="round"/>
-        <g class="pop" style="animation-delay:3.300s"><path d="M622 634v-62" stroke="#133C6A" stroke-width="5" stroke-linecap="round"/><path d="M624 572h46l-12 15 12 15h-46Z" fill="#F68A1D" stroke="#133C6A" stroke-width="3" stroke-linejoin="round"/></g>
+        <rect class="c-sky" x="-60" y="-60" width="920" height="1020"/>
+        <g data-d="3" class="stars">${Array.from({ length: 46 }, (_, i) => `<circle cx="${(i * 173 + 31) % 800}" cy="${(i * 97 + 13) % 470}" r="${1.2 + (i % 3) * 0.7}" style="animation-delay:${(i % 7) * 0.4}s"/>`).join('')}</g>
+        <g data-d="7"><g class="orbw"><circle class="orb" cx="610" cy="190" r="78"/><g class="craters"><circle cx="585" cy="170" r="13"/><circle cx="632" cy="212" r="9"/><circle cx="640" cy="160" r="6"/></g></g></g>
+        <g data-d="10"><g class="cloud"><ellipse cx="80" cy="150" rx="70" ry="22"/><ellipse cx="130" cy="132" rx="46" ry="24"/><ellipse cx="40" cy="138" rx="34" ry="16"/></g>
+          <g class="cloud" style="animation-duration:95s;animation-delay:-40s;opacity:.8"><ellipse cx="30" cy="290" rx="58" ry="16"/><ellipse cx="72" cy="276" rx="36" ry="17"/></g>
+          <g class="birds"><path d="M0 0q7-9 14 0q7-9 14 0"/><path d="M34 16q6-8 12 0q6-8 12 0"/><path d="M-22 22q5-7 10 0q5-7 10 0"/></g></g>
+        <g data-d="15"><path class="c-far" d="M-60 560C60 500 110 380 190 380s110 110 180 70 90-170 170-170 120 160 180 190 80-40 140-30V960H-60Z"/>
+          <path class="c-cap" d="M512 296c12-10 34-18 50-6 22 16 30 48 42 70-22-14-40 4-58-6s-26-30-34-58Z"/></g>
+        <g data-d="25"><path class="c-mid" d="M-60 690C50 640 120 500 220 500s120 120 190 90 110-130 190-130 150 150 260 170V960H-60Z"/>
+          <path class="c-cap" d="M188 506c16-8 42-10 60 0 24 14 34 40 48 60-26-12-44 6-64-4s-30-32-44-56Z"/></g>
+        <g data-d="38"><path class="c-near" d="M-60 800C80 760 150 640 260 640s150 110 240 100 130-110 210-110 90 60 150 70V960H-60Z"/>
+          <path class="thread" d="M300 846C370 800 250 720 262 648c60-6 110 90 236 92 50-36 76-100 124-108" fill="none" stroke="#fff" stroke-width="13" stroke-linecap="round"/>
+          <path class="thread" d="M300 846C370 800 250 720 262 648c60-6 110 90 236 92 50-36 76-100 124-108" fill="none" stroke="#E2001A" stroke-width="6" stroke-linecap="round"/>
+          <g class="pop" style="animation-delay:1.5s"><path class="tent" d="M262 620l17 28h-34Z"/><path class="fire" d="M288 648q5-13 0-20q11 7 9 20Z"/></g>
+          <g class="pop" style="animation-delay:2.3s"><path class="tent" d="M498 712l17 28h-34Z"/><path class="fire" d="M524 740q5-13 0-20q11 7 9 20Z"/></g>
+          <g class="pop" style="animation-delay:3.3s"><path d="M622 634v-62" stroke="#133C6A" stroke-width="5" stroke-linecap="round"/><path class="flag" d="M624 572h46l-12 15 12 15h-46Z"/></g></g>
+        <g data-d="54"><path class="c-snow" d="M-60 850c150-40 320-20 480-34s260-34 440-20V960H-60Z"/></g>
       </svg>
-      <img class="hiker" src="/static/img/logo.png" alt="Турклуб «Восхождение»">
+      <button type="button" class="orbhit" id="tod" title="Сменить время суток" aria-label="Сменить время суток"></button>
+      <button type="button" class="hiker" id="hiker" aria-label="Турист"><img src="/static/img/logo.png" alt="Турклуб «Восхождение»"></button>
+      <div class="bubble" id="bubble" hidden></div>
     </div>
     <div class="login-side">
       <div class="club">турклуб «Восхождение»</div>
@@ -160,6 +198,7 @@ function renderLogin() {
         <li>Забери обзорную карту, карты дней и профили в PNG, JPG или PDF.</li>
       </ol>
     </div></div>`;
+  sceneLive();
   $('#login').onsubmit = async e => {
     e.preventDefault(); const f = e.target; const name = f.name.value.trim();
     try {
@@ -206,7 +245,9 @@ function fmtDates(c) {
 function thumbSvg(c) {
   if (!c.thumb || !c.thumb.length) return '<div class="empty">трека пока нет</div>';
   const d = l => 'M' + l.map(p => p.join(' ')).join('L');
-  return `<svg viewBox="0 0 200 100" preserveAspectRatio="xMidYMid meet">${c.thumb.map(l => `<path class="under" d="${d(l)}"/>`).join('')}${c.thumb.map((l, i) => `<path pathLength="1" class="${i % 2 ? 'b' : ''}" d="${d(l)}"/>`).join('')}</svg>`;
+  const n = c.thumb.reduce((a, l) => a + l.length, 0);
+  return `<svg viewBox="0 0 200 100" preserveAspectRatio="xMidYMid meet">${c.thumb.map(l => `<path class="under" d="${d(l)}"/>`).join('')}${c.thumb.map((l, i) => `<path pathLength="1" class="${i % 2 ? 'b' : ''}" d="${d(l)}"/>`).join('')}
+    <circle class="walker" r="3.6"><animateMotion dur="${Math.min(9, Math.max(3.5, n / 22)).toFixed(1)}s" repeatCount="indefinite" begin="indefinite" path="${c.thumb.map(d).join('')}"/></circle></svg>`;
 }
 function renderHome() {
   document.title = 'Нитка — мои походы';
@@ -215,6 +256,7 @@ function renderHome() {
   <main class="home">
     <div class="home-head"><div><h1>${P.length ? 'Мои походы' : `Привет, ${esc(S.user.name)}!`}</h1>
       <p>${P.length ? 'Сами карты хранятся ' + S.cfg.keep_days + ' дней, а поход со всеми настройками — всегда: пересоберёшь в один клик.' : 'Здесь будут твои походы. Начни с первого — понадобится трек: GPX, KML или ссылка nakarte.me.'}</p></div></div>
+    ${P.some(p => p.card && p.card.geo && p.card.geo.length) ? '<div class="atlas"><div id="atlas"></div><span class="atlas-cap">Где ты ходил · наведи на поход или нажми на нитку</span></div>' : ''}
     <div class="grid">
       <button class="card new" data-a="new"><div><span class="plus">+</span>Новый поход</div></button>
       ${P.map((p, i) => { const c = p.card || {}; const b = p.build || {};
@@ -226,7 +268,53 @@ function renderHome() {
           <div class="info"><h3>${esc(p.title)}</h3>
             <div class="meta">${[c.area, c.kind, c.ndays ? `${c.ndays} ${plural(c.ndays, 'день', 'дня', 'дней')}` : '', c.km ? `${km(c.km)} км` : '', fmtDates(c)].filter(Boolean).map(esc).map(x => `<span>${x}</span>`).join('')}</div>
             <div>${st}</div></div></div>`; }).join('')}
-    </div></main>`;
+    </div></main>
+  <button type="button" class="mascot" id="mascot" aria-label="Турист"><img src="/static/img/logo.png" alt=""></button><div class="bubble mbubble" id="mbubble" hidden></div>`;
+  homeLive();
+  const withTrack = P.filter(p => p.card && p.card.km), total = withTrack.reduce((a, p) => a + p.card.km, 0), ready = P.filter(p => p.build && p.build.state === 'done' && p.build.n);
+  const lines = !P.length ? ['Начнём? Жми «Новый поход».', 'Нужен только трек: GPX, KML или ссылка nakarte.', 'Первый поход — самый памятный.']
+    : [`${P.length} ${plural(P.length, 'поход', 'похода', 'походов')}${total ? ` и ${km(total, 0)} км на всех` : ''}. Неплохо!`,
+       ...withTrack.slice(0, 4).map(p => `«${p.title}» — ${km(p.card.km, 0)} км${p.card.ndays ? ` за ${p.card.ndays} ${plural(p.card.ndays, 'день', 'дня', 'дней')}` : ''}. Помнишь?`),
+       ...(ready.length ? [`Карты «${ready[0].title}» готовы — забирай, пока лежат.`] : ['Собрать карты — пара минут. Попробуй.']),
+       matchMedia('(hover: hover)').matches ? 'Наведи на поход — покажу его на карте.' : 'Нажми на нитку на карте — открою поход.',
+       'Куда дальше пойдём?', ...PHRASES.slice(0, 5)];
+  talker($('#mascot'), $('#mbubble'), lines, 1800);
+}
+// ---- главная вживую: карта со всеми нитками, карточки наклоняются за курсором, по нитке идёт «турист»
+let atlas = null;
+function destroyAtlas() { if (atlas) { atlas.remove(); atlas = null; } }
+function homeLive() {
+  const lines = {};
+  const cardOf = id => $(`.card[data-id="${id}"]`);
+  const hot = (id, on, fly) => {
+    const c = cardOf(id); c && c.classList.toggle('hot', on);
+    const l = lines[id]; if (!l || !atlas) return;
+    l.top.forEach(x => x.setStyle({ weight: on ? 6 : 3.5 })); if (on) l.grp.bringToFront();
+    if (on && fly) atlas.flyToBounds(l.bounds.pad(0.4), { duration: 0.7, maxZoom: 12 });
+  };
+  $$('.card[data-id]').forEach(c => {
+    const am = $('animateMotion', c), w = $('.walker', c), id = c.dataset.id;
+    c.addEventListener('pointerenter', e => { if (e.pointerType === 'touch') return; if (am) { try { am.beginElement(); } catch (err) { /* старый браузер */ } w.style.opacity = 1; } hot(id, true, true); });
+    c.addEventListener('pointerleave', () => { c.style.setProperty('--rx', '0deg'); c.style.setProperty('--ry', '0deg'); if (am) { try { am.endElement(); } catch (err) { /* ок */ } w.style.opacity = 0; } hot(id, false); });
+    c.addEventListener('pointermove', e => { if (e.pointerType === 'touch') return; const r = c.getBoundingClientRect(); c.style.setProperty('--ry', (((e.clientX - r.left) / r.width - 0.5) * 8).toFixed(2) + 'deg'); c.style.setProperty('--rx', ((0.5 - (e.clientY - r.top) / r.height) * 8).toFixed(2) + 'deg'); });
+  });
+  destroyAtlas();
+  const el = $('#atlas'); if (!el) return;
+  atlas = L.map(el, { zoomControl: false, attributionControl: false, scrollWheelZoom: false, zoomSnap: 0.25 });
+  L.control.zoom({ position: 'bottomright' }).addTo(atlas); tiles('otm').addTo(atlas);
+  let all = null;
+  S.projects.forEach((p, i) => {
+    const g = p.card && p.card.geo, b = p.card && p.card.bbox; if (!g || !g.length || !b) return;
+    const grp = L.featureGroup().addTo(atlas); const top = [];
+    g.forEach(l => { L.polyline(l, { color: '#fff', weight: 8, opacity: 0.9 }).addTo(grp); top.push(L.polyline(l, { color: i % 2 ? VIOLET : RED, weight: 3.5 }).addTo(grp)); });
+    L.marker([(b[0] + b[2]) / 2, (b[1] + b[3]) / 2], { icon: L.divIcon({ className: '', html: `<div class="apin">${esc(p.title)}</div>`, iconSize: [0, 0] }), keyboard: false }).addTo(grp);
+    grp.on('click', () => go(`#/p/${p.id}/tracks`)); grp.on('mouseover', () => hot(p.id, true)); grp.on('mouseout', () => hot(p.id, false));
+    const bounds = L.latLngBounds([b[0], b[1]], [b[2], b[3]]); lines[p.id] = { grp, top, bounds };
+    all = all ? all.extend(bounds) : L.latLngBounds(bounds.getSouthWest(), bounds.getNorthEast());
+  });
+  const fitAll = fly => all && (fly ? atlas.flyToBounds(all.pad(0.3), { duration: 0.8, maxZoom: 11 }) : atlas.fitBounds(all.pad(0.3), { maxZoom: 11, animate: false }));
+  fitAll(false);
+  const grid = $('.grid'); grid && grid.addEventListener('pointerleave', () => fitAll(true));
 }
 function modal(html, onMount) {
   const v = document.createElement('div'); v.className = 'veil'; v.innerHTML = `<div class="modal" role="dialog" aria-modal="true">${html}</div>`;
@@ -277,7 +365,7 @@ async function openProject(pid, step) {
     const d = await api('GET', `/api/projects/${pid}`);
     S.pid = pid; S.proj = d.project; S.build = d.build; S.step = step; S.selPiece = S.selPoint = null; S.filter = 'all'; S.folder = ''; S.q = ''; S.lastInfo = null; S.mode = null; S.selBand = null; S.bandA = null; S.ptab = 'points';
     if (!S.proj.pieces.length) S.step = 'tracks';
-    renderEditor();
+    destroyAtlas(); renderEditor();
     if (['running', 'queued'].includes(S.build.state)) startPoll();
   } catch (e) { fail(e); S.pid = null; go('#/'); }
 }
@@ -934,7 +1022,9 @@ const A = {
       if (a === 'del') confirmBox('Удалить поход?', `«${esc(p.title)}» исчезнет вместе с треками и собранными картами. Вернуть будет нельзя.`, 'Удалить', async () => { try { await api('DELETE', `/api/projects/${id}`); await loadProjects(); renderHome(); toast('Поход удалён'); } catch (er) { fail(er); } }); };
   },
   step(el) { go(`#/p/${S.pid}/${el.dataset.step}`); },
-  base(el) { S.base = el.dataset.base; localStorage.nitkaBase = S.base; setBase(); $$('.mapbar .chip').forEach(c => c.classList.toggle('on', c.dataset.base === S.base)); },
+  base(el) {
+    const order = ['otm', 'gsh100', 'esri'];
+    S.base = el.dataset.base === S.base && isPhone() ? order[(order.indexOf(S.base) + 1) % order.length] : el.dataset.base; localStorage.nitkaBase = S.base; setBase(); $$('.mapbar .chip').forEach(c => c.classList.toggle('on', c.dataset.base === S.base)); },
   'src-del'(el) { const s = P().sources.find(x => x.id === el.dataset.id);
     confirmBox('Убрать файл?', `Все треки и точки из «${esc(s.name)}» уйдут из похода — вместе с правками, которые ты в них сделал.`, 'Убрать', async () => { await flush(); try { S.proj = (await api('POST', `/api/projects/${S.pid}/source-delete`, { id: s.id })).project; S.lastInfo = null; paintPanel(); drawMap(true); } catch (e) { fail(e); } }); },
   piece(el, ev) { if (ev.target.closest('input,select,button')) return; S.selPiece = el.dataset.id; $$('.pc').forEach(r => r.classList.toggle('sel', r.dataset.id === S.selPiece)); drawPieces(); const l = lines[S.selPiece]; l && map.fitBounds(l.getBounds().pad(0.25)); },

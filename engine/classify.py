@@ -208,11 +208,15 @@ def classify_point(name, folder='', sym='', year=None):
     base = (body[:hm.start()] + ' ' + body[hm.end():]) if hm else body
     base = re.sub(r'\s+', ' ', base).strip(' ,.;:-–()')
     bl = base.lower()
+    keep = re.sub(r'\s+', ' ', body).strip(' ,.;:-–()')        # название с числами — для точек, у которых высоты нет («ж/д 122 км»)
 
     def title(prefix, pat):
         t = re.sub(pat, '', base, flags=re.I).strip(' ,.;:-–')
         return (prefix + t).strip() if t else prefix.strip()
 
+    # «г. Осташков финиш 15.06» — это город и конец маршрута, а не гора: старт и финиш рисуются сами
+    if re.search(r'(^|[^а-яё])(старт|финиш)([^а-яё]|$)', bl) and not re.search(r'автобус|станци|вокзал|остановк|паром|ж/?д|электричк|причал', bl) and not grade and not h:
+        return out
     if re.match(r'^(пер\.|пер\s|перевал)', bl):
         out.update(type='pass', name=title('пер. ', r'^(перевал|пер\.?)\s*'), grade=grade, h=h); return out
     if re.match(r'^(гора|г\.|влк\.?|вулкан)\s', bl + ' '):
@@ -225,7 +229,7 @@ def classify_point(name, folder='', sym='', year=None):
         if re.search(pat, bl):
             if t == 'skip': return out
             if f_pass and t in ('campsite', 'sight', 'house'): continue
-            out.update(type=t, name=base if t not in ('campsite',) or len(base) > 12 else base.capitalize(), grade=grade if TYPE[t].get('graded') else None, h=h if t in OBJ_TYPES else None)
+            out.update(type=t, name=(base if t in OBJ_TYPES else keep) if t not in ('campsite',) or len(base) > 12 else base.capitalize(), grade=grade if TYPE[t].get('graded') else None, h=h if t in OBJ_TYPES else None)
             return out
     if f_pass:
         out.update(type='pass' if h else 'obst', name=('пер. ' + base) if h else base, grade=grade, h=h); return out

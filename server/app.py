@@ -108,7 +108,12 @@ def card_of(proj):
         for l in lines:
             pts = l[::step] + ([l[-1]] if (len(l) - 1) % step else [])
             thumb.append([[round(((q[1] - lo0) * kx - w / 2) * s + 100, 1), round((h / 2 - (q[0] - la0)) * s + 50, 1)] for q in pts])
-    c = dict(area=meta.get('area') or '', kind=meta.get('kind') or '', start=meta.get('start_date'), km=round(km, 1), ndays=len(days),
+    geo = []; bbox = None
+    if allp:
+        gstep = max(1, len(allp) // 160)
+        geo = [[[round(q[0], 5), round(q[1], 5)] for q in (l[::gstep] + ([l[-1]] if (len(l) - 1) % gstep else []))] for l in lines]      # нитка в настоящих координатах — для карты «где ты ходил»
+        bbox = [round(la0, 5), round(lo0, 5), round(la1, 5), round(lo1, 5)]
+    c = dict(geo=geo, bbox=bbox, area=meta.get('area') or '', kind=meta.get('kind') or '', start=meta.get('start_date'), km=round(km, 1), ndays=len(days),
              last=max(days) if days else 0, pieces=len(pcs), points=sum(1 for p in proj.get('points', []) if p.get('type') != 'skip'), thumb=thumb)
     return c
 
@@ -452,6 +457,11 @@ class H(BaseHTTPRequestHandler):
             rows = db().execute('SELECT id,title,card,created,updated FROM projects WHERE user_id=? ORDER BY updated DESC', (uid,)).fetchall()
             out = []
             for r in rows:
+                if '"geo"' not in (r['card'] or ''):          # карточка старого образца — пересчитываем один раз
+                    pj = db().execute('SELECT json FROM projects WHERE id=?', (r['id'],)).fetchone()
+                    card = json.dumps(card_of(json.loads(pj['json'])), ensure_ascii=False)
+                    db().execute('UPDATE projects SET card=? WHERE id=?', (card, r['id'])); db().commit()
+                    r = dict(r, card=card)
                 st = build_status(r['id'])
                 out.append(dict(id=r['id'], title=r['title'], updated=r['updated'], card=json.loads(r['card'] or '{}'),
                                 build=dict(state=st.get('state'), expires=st.get('expires'), n=sum(1 for s in st.get('sheets', []) if s.get('state') == 'ok'))))

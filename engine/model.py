@@ -265,7 +265,7 @@ class Trip:
         # сглаживание: в горах — лёгкое (±50 м по нитке); на равнине модель рельефа шумит кронами леса сильнее,
         # чем меняется сам рельеф, поэтому окно шире (до ±200 м)
         amp = max(z) - min(z)
-        h = 2 if (use_track or amp >= 300) else (4 if amp >= 120 else 8)
+        h = 2 if (use_track or self._mountain() or amp >= 300) else (4 if amp >= 120 else 8)
         z = [sum(z[max(0, i - h):i + h + 1]) / len(z[max(0, i - h):i + h + 1]) for i in range(n)]
         ret = [f == 1 for f in fl]
         marks = []; anchors = []; cam = set()
@@ -316,6 +316,14 @@ class Trip:
         self._prof[d] = dict(day=d, x=x, c=ckm, ret=ret, gap=[f == 2 for f in fl], gapx=[x[i] for i in range(n) if fl[i] == 2], z=z, pts=pts, marks=marks, L=ckm[-1], Lpath=x[-1], up=up, dn=dn,
                              zmin=min(z), zmax=max(z), src='track' if use_track else 'dem')
         return self._prof[d]
+
+    def _mountain(self):
+        """Горный ли поход в целом (перепад высот по всей нитке от 600 м): тогда сглаживание везде лёгкое, как в горах."""
+        if not hasattr(self, '_mnt'):
+            pts = self.all_pts()[::3]
+            self._S.prefetch(pts); zz = [self._S(*p) for p in pts]
+            self._mnt = (max(zz) - min(zz)) >= 600 if zz else False
+        return self._mnt
 
     def camp_height(self, c):
         """Высота ночёвки: заданная руками, иначе по профилю дня, который на ней закончился (или начался); до 10 м."""
