@@ -71,6 +71,7 @@ window.addEventListener('hashchange', route);
 async function route() {
   const m = location.hash.match(/^#\/p\/([0-9a-f]{12})(?:\/(\w+))?/);
   if (!S.user) return render();
+  if (needOrigin() && !S.proj) return renderOrigin();      // только на входе, не посреди работы в редакторе
   if (m) {
     const step = STEPS.some(s => s[0] === m[2]) ? m[2] : 'tracks';
     if (S.pid !== m[1]) { await openProject(m[1], step); return; }
@@ -138,10 +139,31 @@ function renderLogin() {
     e.preventDefault(); const f = e.target; const name = f.name.value.trim();
     try {
       const d = await api('POST', '/api/login', { name, code: f.code ? f.code.value : '' });
-      localStorage.nitkaName = name; S.user = d.user;
+      localStorage.nitkaName = name; S.user = d.user; S.isNew = d.new;
       toast(d.new ? `Приятно познакомиться, ${d.user.name}!` : `С возвращением, ${d.user.name}!`);
       route();
     } catch (err) { fail(err); f.name.focus(); }
+  };
+}
+// Один вопрос после первого входа: откуда человек (турклуб, город…). Тем, кто пришёл раньше, — тот же вопрос, но можно отложить.
+const needOrigin = () => S.user && !S.user.origin && !S.originLater;
+function renderOrigin() {
+  document.title = 'Нитка — откуда ты?';
+  const quick = ['Турклуб «Восхождение»', 'Другой турклуб', 'Сам по себе'];
+  app.innerHTML = topBar(`<span class="sp"></span><span class="who">${esc(S.user.name)}</span>`) + `
+    <main class="home origin"><div class="home-head"><div><h1>Откуда ты, ${esc(S.user.name)}?</h1>
+      <p>Турклуб, секция, город, компания друзей — что угодно. Просто чтобы понимать, кто пользуется «Ниткой».</p></div></div>
+      <form id="originf" class="sec" style="max-width:520px">
+        <div class="chips">${quick.map(q => `<button type="button" class="chip" data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div>
+        <label class="field"><span>Откуда</span><input name="origin" type="text" maxlength="80" placeholder="например: турклуб «Восхождение», Москва" ${isPhone() ? '' : 'autofocus'}></label>
+        <div class="acts" style="display:flex;gap:10px;align-items:center"><button class="btn go big">Готово →</button>${S.isNew ? '' : '<button type="button" class="btn ghost" data-later>Не сейчас</button>'}</div>
+      </form></main>`;
+  const f = $('#originf');
+  $$('.chip', f).forEach(c => c.onclick = () => { const v = c.dataset.q; f.origin.value = v === 'Другой турклуб' ? 'Турклуб ' : v; f.origin.focus(); if (v !== 'Другой турклуб') f.requestSubmit(); });
+  const later = $('[data-later]', f); if (later) later.onclick = () => { S.originLater = true; route(); };
+  f.onsubmit = async e => {
+    e.preventDefault();
+    try { const d = await api('POST', '/api/profile', { origin: f.origin.value }); S.user.origin = d.origin; toast('Спасибо!'); route(); } catch (err) { fail(err); f.origin.focus(); }
   };
 }
 

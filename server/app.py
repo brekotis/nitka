@@ -50,6 +50,8 @@ def init_db():
       CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, user_id INTEGER, title TEXT, json TEXT, card TEXT, created REAL, updated REAL);
       CREATE INDEX IF NOT EXISTS projects_user ON projects(user_id, updated);
     ''')
+    if 'origin' not in [r[1] for r in c.execute('PRAGMA table_info(users)')]:
+        c.execute('ALTER TABLE users ADD COLUMN origin TEXT')        # «откуда вы» — турклуб, город и т. п.
     c.commit()
 
 def user_key(name):
@@ -359,7 +361,7 @@ class H(BaseHTTPRequestHandler):
     def api(self, m, a, q):
         if a == ['me']:
             u = self.uid(); r = db().execute('SELECT * FROM users WHERE id=?', (u,)).fetchone() if u else None
-            return self.send(200, dict(user=dict(name=r['name']) if r else None, need_code=bool(CODE), keep_days=KEEP_DAYS))
+            return self.send(200, dict(user=dict(name=r['name'], origin=r['origin'] or '') if r else None, need_code=bool(CODE), keep_days=KEEP_DAYS))
         if a == ['login'] and m == 'POST':
             d = self.json(); name = str(d.get('name') or '')
             key, shown = user_key(name)
@@ -374,9 +376,14 @@ class H(BaseHTTPRequestHandler):
             else:
                 c.execute('UPDATE users SET seen=? WHERE id=?', (time.time(), r['id'])); c.commit(); new = False
             n = c.execute('SELECT COUNT(*) FROM projects WHERE user_id=?', (r['id'],)).fetchone()[0]
-            return self.send(200, dict(user=dict(name=r['name']), new=new, projects=n),
+            return self.send(200, dict(user=dict(name=r['name'], origin=r['origin'] or ''), new=new, projects=n),
                              headers={'Set-Cookie': f'nitka={sign(r["id"])}; Path=/; Max-Age=63072000; HttpOnly; SameSite=Lax'
                                       + ('; Secure' if self.headers.get('X-Forwarded-Proto') == 'https' else '')})
+        if a == ['profile'] and m == 'POST':
+            uid = self.need_user(); origin = re.sub(r'\s+', ' ', str(self.json().get('origin') or '')).strip()[:80]
+            if len(origin) < 2: raise Err(400, 'Напиши пару слов: турклуб, город или «сам по себе».')
+            db().execute('UPDATE users SET origin=? WHERE id=?', (origin, uid)); db().commit()
+            return self.send(200, dict(ok=True, origin=origin))
         if a == ['logout'] and m == 'POST':
             return self.send(200, dict(ok=True), headers={'Set-Cookie': 'nitka=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax'})
         if a == ['types']:
