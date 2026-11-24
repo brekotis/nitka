@@ -83,7 +83,7 @@ def _spread(xs, ws, lo, hi, gap=0.0):
 
 # ---------------------------------------------------------------- профиль
 def draw(img, box, segs, marks, camps, *, grade_col, orient='v', title=None, note=None, ylim=None, ystep=None,
-         xstep=None, day_strip=True, pt=6.0, x_label='км от начала маршрута', bounds=True, head_min=0, dry=False, bands=None):
+         xstep=None, day_strip=True, pt=6.0, x_label='км от начала маршрута', bounds=True, head_min=0, dry=False, bands=None, vex_max=None):
     x0, y0, w, h = box
     X0 = segs[0]['x'][0]; X1 = segs[-1]['x'][-1]
     zmin = min(min(s['z']) for s in segs); zmax = max(max(s['z']) for s in segs)
@@ -94,6 +94,10 @@ def draw(img, box, segs, marks, camps, *, grade_col, orient='v', title=None, not
     fx = lambda v: L + (R - L) * (v - X0) / (X1 - X0)
     lo = ylim[0] if ylim else math.floor((zmin - 60) / 100) * 100
     zhi = ylim[1] if ylim else zmax
+    if vex_max:
+        # равнину не вытягиваем в «горы»: вертикальный масштаб крупнее горизонтального не больше чем в vex_max раз
+        need = (B - T - max(mm(6), head_min)) * (X1 - X0) * 1000 / ((R - L) * vex_max)
+        if zhi - lo < need: zhi = lo + need
     if not ystep:
         span = zhi - lo; ystep = 100 if span <= 700 else (200 if span <= 1500 else 500)
 
@@ -136,7 +140,7 @@ def draw(img, box, segs, marks, camps, *, grade_col, orient='v', title=None, not
         head = min(head + over + 2, (B - T) * 0.62)
     hi_eff = lo + (zhi - lo) * (B - T) / (B - T - head)
     grid_top = math.ceil(zhi / ystep) * ystep
-    if dry: return img, dict(head=head)
+    if dry: return img, dict(head=head, zhi=zhi)
 
     d = ImageDraw.Draw(img)
     fa = font(5.8, cond=True)
@@ -199,6 +203,15 @@ def draw(img, box, segs, marks, camps, *, grade_col, orient='v', title=None, not
             yy = yb
             while yy < B:
                 d.line((xb, yy, xb, min(B, yy + mm(0.9))), fill=(110, 110, 110), width=2); yy += mm(1.7)
+    # переезды: между днями и внутри дня (нитка прерывается, километры не идут)
+    fj = font(5.0, cond=True, italic=True)
+    jumps = [s['x'][0] for s in segs[1:] if s.get('transfer')] + [gx for s in segs for gx in s.get('gapx', [])]
+    for gx in jumps:
+        xb = fx(gx)
+        for yy in range(int(T) + 4, int(B) - 2, int(mm(1.3))):
+            d.line((xb, yy, xb, min(B, yy + mm(0.7))), fill=(90, 90, 90), width=2)
+        rot_text(img, 'переезд', fj, (xb + mm(1.3), B - mm(6.5)), 90, fill=(80, 80, 80))
+    d = ImageDraw.Draw(img)
     d.rectangle((L, T, R, B), outline=INK, width=2)
     fv = font(5.2, cond=True, italic=True)
     for xa, xb in veil:

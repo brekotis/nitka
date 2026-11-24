@@ -516,6 +516,8 @@ function todos() {
   const first = M.days.find(d => d.pieces.length);
   if (M.loose.length && M.max) out.push({ step: 'days', text: `${M.loose.length} ${plural(M.loose.length, 'кусок', 'куска', 'кусков')} нитки без дня`, btn: 'К дням' });
   if (first && first.n > 1) out.push({ step: 'days', text: `Первые ${first.n - 1} ${plural(first.n - 1, 'день', 'дня', 'дней')} без треков — похоже, сбита нумерация`, btn: 'Поправить' });
+  const bad = badOrderDays();
+  if (bad.length) out.push({ step: 'days', fix: 'order', text: `${bad.length > 1 ? 'В днях' : 'В дне'} ${bad.join(', ')} куски нитки стоят не по ходу движения — из-за этого появляются ложные переезды`, btn: 'Расставить по ходу' });
   if (!pr.meta.start_date) out.push({ step: 'days', text: 'Не указана дата первого дня — на картах не будет дат', btn: 'Указать' });
   if (M.max > 1 && !pts.some(q => q.type === 'camp')) out.push({ step: 'points', tab: 'points', run: 'camps', text: 'Ночёвки не отмечены — могу поставить их в концах дней', btn: 'Предложить ночёвки' });
   if (showObst() && !objs.length) out.push({ step: 'points', tab: 'obst', run: 'passes', text: 'Перевалы и вершины не отмечены — найду их по каталогу, с категориями и высотами', btn: 'Найти перевалы' });
@@ -539,6 +541,28 @@ function campDate(q) {
   return null;
 }
 // «Лагерь 22.07» записан как место под стоянку → делаем ночёвкой; подсказанные рядом ночёвки-дубли убираем
+// Дни, где другой порядок кусков основной нитки делает её заметно связнее (в файлах сегменты часто лежат не по ходу)
+function badOrderDays() {
+  const by = {}; P().pieces.filter(p => p.role === 'main' && p.day && p.pts.length > 1).sort((a, b) => a.order - b.order).forEach(p => (by[p.day] = by[p.day] || []).push(p));
+  const ds = Object.keys(by).map(Number).sort((a, b) => a - b); const D = (a, b) => L.latLng(a[0], a[1]).distanceTo([b[0], b[1]]);
+  const last = p => p.pts[p.pts.length - 1]; const perms = a => a.length < 2 ? [a] : a.flatMap((x, i) => perms([...a.slice(0, i), ...a.slice(i + 1)]).map(r => [x, ...r]));
+  const out = []; let prev = null;
+  ds.forEach((d, k) => {
+    let cur = by[d];
+    if (cur.length > 1 && cur.length <= 6) {
+      const nxt = k + 1 < ds.length ? by[ds[k + 1]].map(q => q.pts[0]) : [];
+      const cost = pm => (prev ? D(prev, pm[0].pts[0]) : 0) + pm.slice(1).reduce((s, b, i) => s + D(last(pm[i]), b.pts[0]), 0) + (nxt.length ? Math.min(...nxt.map(q => D(last(pm[pm.length - 1]), q))) : 0);
+      const best = perms(cur).reduce((a, b) => cost(b) < cost(a) ? b : a, cur);
+      if (cost(best) < cost(cur) - 50) { out.push(d); cur = best; }
+    }
+    prev = last(cur[cur.length - 1]);
+  });
+  return out;
+}
+async function fixOrder() {
+  await flush();
+  try { const r = await api('POST', `/api/projects/${S.pid}/chain-order`); S.proj = r.project; toast(r.changed ? 'Куски расставлены по ходу движения. Пересобери карты — профиль и листы изменятся.' : 'Порядок уже верный'); paintPanel(); drawMap(); } catch (e) { fail(e); }
+}
 function fixCamps() {
   const pts = P().points; const made = [];
   for (const q of pts) {
@@ -946,6 +970,7 @@ const A = {
   todo(el) {
     const t = todos()[+el.dataset.i]; if (!t) return;
     if (t.fix === 'camps') return fixCamps();
+    if (t.fix === 'order') return fixOrder();
     const jump = S.step !== t.step; S.selPoint = null; S.selBand = null;
     if (t.tab) S.ptab = t.tab; if (t.filter) S.filter = t.filter;
     if (jump) go(`#/p/${S.pid}/${t.step}`); else { paintPanel(true); drawPoints(); }

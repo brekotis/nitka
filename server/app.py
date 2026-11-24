@@ -511,6 +511,10 @@ class H(BaseHTTPRequestHandler):
                     if what == 'passes': return self.send(200, dict(items=suggest.passes(proj)))
                 except RuntimeError as e: raise Err(503, str(e))
                 raise Err(400, 'Не понял, что подсказать.')
+            if sub == 'chain-order' and m == 'POST':
+                n = classify.chain_order(proj)
+                if n: save_project(pid, uid, proj)
+                return self.send(200, dict(project=proj, changed=n))
             if sub == 'split-by-camps' and m == 'POST':
                 r = classify.split_by_camps(proj)
                 if r['ok']: save_project(pid, uid, proj)

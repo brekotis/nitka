@@ -2,7 +2,7 @@
 
 Тип точки угадывается по её названию и по названию папки/трека, где она лежала; всё можно поправить руками.
 """
-import math, re, secrets
+import itertools, math, re, secrets
 from datetime import date, datetime, timedelta, timezone
 from .importers import simplify
 
@@ -413,9 +413,33 @@ def merge_import(proj, layers, src_name):
         cd = sorted(p['date'] for p in proj['points'] if p['type'] == 'camp' and p.get('date'))
         if cd and any(x.get('day') for x in proj['pieces']):
             meta['start_date'] = cd[0]
+    chain_order(proj, {x['day'] for x in proj['pieces'] if x.get('src') == sid and x.get('day')})
     proj['sources'].append(dict(id=sid, name=src_name, pieces=len(new_pieces), points=sum(counts.values())))
     return dict(source=sid, pieces=len(new_pieces), assigned=n_assigned, skipped=sum(1 for p in new_pieces if p['skip']), points=counts,
                 unassigned=sum(1 for p in proj['pieces'] if not p.get('day') and p['role'] != 'skip'))
+
+def chain_order(proj, days=None):
+    """Куски основной нитки внутри дня — по ходу движения: день продолжает предыдущий, каждый следующий кусок
+    начинается там, где кончился прошлый. В файлах сегменты часто лежат не по порядку. Возвращает число исправленных дней."""
+    by = {}
+    for p in sorted(proj.get('pieces', []), key=lambda p: p.get('order', 0)):
+        if p.get('role') == 'main' and p.get('day') and len(p.get('pts', [])) > 1: by.setdefault(int(p['day']), []).append(p)
+    ds = sorted(by); changed = 0; prev_end = None
+    for k, d in enumerate(ds):
+        L = by[d]
+        if len(L) > 1 and (days is None or d in days) and len(L) <= 7:
+            nxt = [q['pts'][0] for q in by[ds[k + 1]]] if k + 1 < len(ds) else []
+            def cost(perm):
+                c = dist(prev_end, perm[0]['pts'][0]) if prev_end else 0.0
+                c += sum(dist(a['pts'][-1], b['pts'][0]) for a, b in zip(perm, perm[1:]))
+                if nxt: c += min(dist(perm[-1]['pts'][-1], q) for q in nxt)
+                return c
+            best = min(itertools.permutations(L), key=cost)
+            if cost(best) < cost(L) - 50:                       # меняем, только если нитка действительно становится связнее
+                for p, o in zip(best, sorted(p.get('order', 0) for p in L)): p['order'] = o
+                by[d] = list(best); changed += 1
+        prev_end = by[d][-1]['pts'][-1]
+    return changed
 
 def remove_source(proj, sid):
     proj['pieces'] = [p for p in proj['pieces'] if p.get('src') != sid]

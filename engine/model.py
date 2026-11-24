@@ -262,7 +262,10 @@ class Trip:
         use_track = self.elev_source(d) == 'track'
         if not use_track or any(e is None for e in el): self._S.prefetch(pts)
         z = [el[i] if (use_track and el[i] is not None) else self._S(*pts[i]) for i in range(n)]
-        h = 2
+        # сглаживание: в горах — лёгкое (±50 м по нитке); на равнине модель рельефа шумит кронами леса сильнее,
+        # чем меняется сам рельеф, поэтому окно шире (до ±200 м)
+        amp = max(z) - min(z)
+        h = 2 if (use_track or amp >= 300) else (4 if amp >= 120 else 8)
         z = [sum(z[max(0, i - h):i + h + 1]) / len(z[max(0, i - h):i + h + 1]) for i in range(n)]
         ret = [f == 1 for f in fl]
         marks = []; anchors = []; cam = set()
@@ -310,7 +313,7 @@ class Trip:
         x = [v * K for v in x]; ckm = [v * K for v in ckm]
         for m in marks: m['x'] = x[m['k']]; m['z'] = z[m['k']]
         marks.sort(key=lambda m: m['x'])
-        self._prof[d] = dict(day=d, x=x, c=ckm, ret=ret, gap=[f == 2 for f in fl], z=z, pts=pts, marks=marks, L=ckm[-1], Lpath=x[-1], up=up, dn=dn,
+        self._prof[d] = dict(day=d, x=x, c=ckm, ret=ret, gap=[f == 2 for f in fl], gapx=[x[i] for i in range(n) if fl[i] == 2], z=z, pts=pts, marks=marks, L=ckm[-1], Lpath=x[-1], up=up, dn=dn,
                              zmin=min(z), zmax=max(z), src='track' if use_track else 'dem')
         return self._prof[d]
 

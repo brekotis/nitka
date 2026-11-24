@@ -9,6 +9,7 @@ from .mapkit import font, mm, INK, View, Overlay, Sheet, g_track, g_dash, g_sym,
 from .model import GRADE_COL
 from .classify import GRADES, dist
 
+VEX_MAX = 60            # предел вертикального растяжения профиля: равнина должна выглядеть равниной
 DAYC = [(226, 0, 26), (122, 26, 170)]          # нечётные / чётные дни
 GREY = (95, 95, 95)
 BROWN = (110, 40, 5)
@@ -136,7 +137,8 @@ class Builder:
         for d in days:
             P = T.profile(d)
             lines = [f'день {d}'] + ([T.date(d)] if T.date(d) else []) + [km(P['L']) + ' км', f"↑{P['up']:.0f} ↓{P['dn']:.0f}"]
-            segs.append(dict(day=d, x=[off + v for v in P['x']], c=[coff + v for v in P['c']], ret=P['ret'], z=P['z'], color=dcol(d), lines=lines))
+            segs.append(dict(day=d, x=[off + v for v in P['x']], c=[coff + v for v in P['c']], ret=P['ret'], z=P['z'], color=dcol(d), lines=lines,
+                             gapx=[off + v for v in P['gapx']], transfer=any(t[1] == d for t in T.TRANSFERS)))
             for m in P['marks']:
                 if m.get('oi') is not None:
                     o = T.OBJ[m['oi']]
@@ -212,15 +214,25 @@ class Builder:
 
     # --------------------------------------------------------------------------- высотный профиль всего маршрута
     def profile_rows(self):
-        T = self.T; rows = []
-        for part in T.PARTS:
-            L = sum(T.profile(d)['Lpath'] for d in part)
+        """Строки общего профиля: части маршрута между переездами, длинные — режутся по ~100 км.
+        Короткий кусок между переездами (день-два) отдельной строкой не идёт — он остаётся в соседней, переезд помечается."""
+        T = self.T; Lof = lambda part: sum(T.profile(d)['Lpath'] for d in part)
+        parts = [list(p) for p in T.PARTS]; tot = Lof([d for p in parts for d in p]); i = 0
+        while len(parts) > 1 and i < len(parts):
+            if Lof(parts[i]) < max(25.0, 0.15 * tot):
+                if i > 0: parts[i - 1] += parts.pop(i); i -= 1
+                else: parts[1] = parts[0] + parts[1]; parts.pop(0)
+                continue
+            i += 1
+        rows = []
+        for part in parts:
+            L = Lof(part)
             n = max(1, int(math.ceil(L / 110.0)))
             if n == 1 or len(part) < 2: rows.append(part); continue
             cur = []; acc = 0.0; target = L / n
             for d in part:
                 cur.append(d); acc += T.profile(d)['Lpath']
-                if acc >= target * 0.92 and len(rows) + 1 < 99 and d != part[-1]:
+                if acc >= target * 0.92 and d != part[-1] and len(rows) < 40:
                     rows.append(cur); cur = []; acc = 0.0
             if cur: rows.append(cur)
         return rows
@@ -252,7 +264,7 @@ class Builder:
         span = zmax_all - zmin_all
         ystep = 50 if span <= 350 else (100 if span <= 800 else (200 if span <= 1600 else 500))
         zlo = math.floor((zmin_all - ystep * 0.2) / ystep) * ystep
-        y = int(1.65 / 2.54 * DPI); off = coff = 0.0; vex = []; head = 0; data = []
+        y = int(1.65 / 2.54 * DPI); off = coff = 0.0; vex = []; head = 0; data = []; ztop = zmax_all
         xl = 'км от начала маршрута' + (f' (длина по карте{self.kx}' + ('; радиальные выходы — в одну сторону' if self.has_rad else '') + ')' if self.kx or self.has_rad else '')
         for k, days in enumerate(rows, 1):
             segs, marks, camps = self.prof_inputs(days, off, coff)
@@ -260,10 +272,13 @@ class Builder:
             dts = f' ({T.date(days[0])}–{T.date(days[-1])})' if T.date(days[0]) and len(days) > 1 else ''
             t = (f'Часть {k} · ' + (f'дни {days[0]}–{days[-1]}' if len(days) > 1 else f'день {days[0]}') + dts + f' · {km(L)} км · набор {num(up)} м · сброс {num(dn)} м'
                  if len(rows) > 1 else None)
-            kw = dict(grade_col=GRADE_COL, orient='v', title=t, ylim=(zlo, zmax_all), ystep=ystep, pt=6.0, x_label=xl, bands=list(self._pbands))
-            head = max(head, prof.draw(img, box, segs, marks, camps, dry=True, **kw)[1]['head'])   # единый вертикальный масштаб частей
+            kw = dict(grade_col=GRADE_COL, orient='v', title=t, ylim=(zlo, zmax_all), ystep=ystep, pt=6.0, x_label=xl, bands=list(self._pbands), vex_max=VEX_MAX)
+            dry = prof.draw(img, box, segs, marks, camps, dry=True, **kw)[1]
+            head = max(head, dry['head']); ztop = max(ztop, dry['zhi'])   # единый вертикальный масштаб частей
             data.append((segs, marks, camps, kw)); off += sum(T.profile(dd)['Lpath'] for dd in days); coff += L
+        span2 = ztop - zlo; ystep = 50 if span2 <= 350 else (100 if span2 <= 800 else (200 if span2 <= 1600 else 500))
         for segs, marks, camps, kw in data:
+            kw.update(ylim=(zlo, ztop), ystep=ystep)
             img, info = prof.draw(img, (x0, y, box[2], box[3]), segs, marks, camps, head_min=head, **kw)
             vex.append(info['vex'] / T.kcoef); y += int((PH + 0.45) / 2.54 * DPI)
         d = ImageDraw.Draw(img)
@@ -662,7 +677,7 @@ class Builder:
         rad_here = bool(T.DAYS[d]['rad'] and T.DAYS[d]['mains']) and T.one_way
         xl = 'км от начала дня' + (f', длина по карте{self.kx}' if self.kx else '') + ' (номера в кружках на карте)' + ('; радиальный выход — в одну сторону' if rad_here else '')
         sh.img, info = prof.draw(sh.img, box, segs, marks, camps, grade_col=GRADE_COL, orient='h',
-                                 title=f'Профиль высот · день {d} · высоты {P["zmin"]:.0f}–{P["zmax"]:.0f} м', day_strip=False, x_label=xl, pt=6.0, bands=list(self._pbands))
+                                 title=f'Профиль высот · день {d} · высоты {P["zmin"]:.0f}–{P["zmax"]:.0f} м', day_strip=False, x_label=xl, pt=6.0, bands=list(self._pbands), vex_max=VEX_MAX)
         sh.d = ImageDraw.Draw(sh.img)
         yl = box[1] + box[3] + mm(1.0)
         extra = [(g_sym('km', '3', size=2.7, color=dcol(d)), 'километры от начала дня' + (f' ({self.kx.strip()})' if self.kx else ''))]
