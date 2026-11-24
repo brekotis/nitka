@@ -21,7 +21,7 @@ KEEP_DAYS = float(os.environ.get('NITKA_KEEP_DAYS') or 7)
 ADMINS = {x.strip().lower() for x in (os.environ.get('NITKA_ADMINS') or 'name:brekotis').split(',') if x.strip()}      # кому видна страница «Кто пользуется»
 ADMIN_TRIES = {}
 MAX_BODY = 45 * 1024 * 1024
-TILE_LAYERS = {'otm': 17, 'gsh100': 14, 'gsh050': 15, 'esri': 17, 'topo500': 14, 'topo1000': 13}
+TILE_LAYERS = {'otm': 17, 'gsh100': 15, 'gsh050': 15, 'esri': 17, 'topo500': 14, 'topo1000': 13}      # gsh100 — сводный слой «Генштаб» (см. topo_tile)
 TILE_CAP = 6 * 1024 ** 3
 TILE_RATE = {}
 BLANK_PNG = bytes.fromhex('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360606060000000050001a5f645400000000049454e44ae426082')
@@ -551,19 +551,49 @@ class H(BaseHTTPRequestHandler):
         if not w or now - w[0] > 600: w = TILE_RATE[uid] = [now, 0]
         w[1] += 1
         if w[1] > 6000: raise Err(429, 'Слишком много запросов карты — подождите несколько минут.')
-        data = mapkit.fetch_tile(layer, z, x, y, timeout=12, tries=2)
-        if data == b'' and layer == 'otm':
-            # OpenTopoMap рисует крупный зум по запросу: «нет тайла» у него значит «ещё не готов» — показываем зум помельче и скоро спросим снова
+        if layer == 'gsh100': return self.topo_tile(z, x, y)
+        # Браузер спрашивает тайл до четырёх раз: без r, потом r=1, 2, 3 — через 5, 15 и 30 секунд (см. tiles() в app.js).
+        # r=oz — временная замена на время ожидания: увеличенный кусок более мелкого зума из кэша.
+        r = (q or {}).get('r', '')
+        if r == 'oz':
             up = self.overzoom(layer, z, x, y)
-            if up: return self.send(200, up, 'image/png', cache='public, max-age=600')
-            return self.send(200, BLANK_PNG, 'image/png', cache='public, max-age=600')
+            return self.send(200, up, 'image/png', cache='no-store') if up else self.send(404, b'', 'image/png', cache='no-store')
+        # OpenTopoMap рисует крупный зум по запросу: «тайла нет» у него значит «ещё не готов» — на повторах спрашиваем его заново
+        data = mapkit.fetch_tile(layer, z, x, y, timeout=12, tries=2, fresh=bool(r) and layer == 'otm')
+        if data == b'' and layer == 'otm':
+            if r != '3': return self.send(503, b'', 'image/png', cache='no-store')      # браузер спросит ещё раз
+            up = self.overzoom(layer, z, x, y)      # три повтора не помогли — оставляем замену, но ненадолго: при следующем просмотре спросим снова
+            return self.send(200, up or BLANK_PNG, 'image/png', cache='public, max-age=300')
         if data == b'': return self.send(200, BLANK_PNG, 'image/png', cache='public, max-age=86400')       # тайла нет вовсе
         if data is None:
-            # сервер карты не ответил: показываем увеличенный кусок более мелкого зума и просим браузер спросить ещё раз
-            up = self.overzoom(layer, z, x, y) if (q or {}).get('r') == '4' else None      # сначала браузер пробует ещё, замена — в последнюю очередь
+            # сервер карты не ответил: просим браузер спросить ещё раз, после последнего повтора — увеличенный кусок более мелкого зума
+            up = self.overzoom(layer, z, x, y) if r == '3' else None
             if up: return self.send(200, up, 'image/png', cache='no-store')
             return self.send(503, b'', 'image/png', cache='no-store')
         self.send(200, data, 'image/jpeg' if data[:2] == b'\xff\xd8' else 'image/png', cache='public, max-age=2592000')
+
+    def topo_tile(self, z, x, y):
+        """«Генштаб» в редакторе: в каждом месте — первая топокарта, которая там есть (Генштаб, потом ГГЦ), как и при сборке листов."""
+        from PIL import Image
+        chain = mapkit.topo_chain(z, 50 if z >= 14 else 100 if z >= 9 else 200, max_up=3)
+        acc = None; failed = False
+        for L, lz in chain:
+            d = 2 ** (z - lz)
+            data = mapkit.fetch_tile(L, lz, x // d, y // d, timeout=12, tries=2)
+            if data is None: failed = True; continue
+            if not data: continue
+            im = Image.open(io.BytesIO(data)).convert('RGBA')
+            if d > 1:
+                c = 256 // d; im = im.crop(((x % d) * c, (y % d) * c, (x % d + 1) * c, (y % d + 1) * c)).resize((256, 256), Image.BICUBIC)
+            if acc is None and d == 1 and im.getchannel('A').getextrema()[0] == 255:
+                return self.send(200, data, 'image/png', cache='public, max-age=2592000')      # целый тайл нужного зума — отдаём как есть
+            acc = im if acc is None else Image.alpha_composite(im, acc)
+            if acc.getchannel('A').getextrema()[0] == 255: break
+        if acc is None:
+            if failed: return self.send(503, b'', 'image/png', cache='no-store')      # браузер спросит ещё раз
+            return self.send(200, BLANK_PNG, 'image/png', cache='public, max-age=86400')      # топокарт здесь нет
+        b = io.BytesIO(); acc.save(b, 'PNG')
+        return self.send(200, b.getvalue(), 'image/png', cache='no-store' if failed else 'public, max-age=86400')
 
     def overzoom(self, layer, z, x, y):
         from PIL import Image

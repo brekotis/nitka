@@ -798,7 +798,7 @@ function stepMaps() {
       <label class="field"><span>Район — для заголовков карт</span><input type="text" data-c="area" value="${esc(pr.meta.area || '')}" maxlength="80" placeholder="например: Сванетия, Центральный Кавказ"></label>
       <div class="sec"><h3>Листы</h3>${SHEET_OPTS.map(([id, t, s]) => `<label class="switch"><input type="checkbox" data-c="sheet" data-f="${id}" ${sh[id] !== false ? 'checked' : ''}><span><b>${t}</b><div class="hint">${s}</div></span></label>`).join('')}</div>
       <div class="field"><span>Масштаб рабочей карты</span><div class="chips">${[[100000, '1:100 000'], [50000, '1:50 000']].map(([v, t]) => `<button class="chip${(sh.work_scale || 100000) === v ? ' on' : ''}" data-a="wscale" data-v="${v}">${t}</button>`).join('')}</div></div>
-      <div class="field"><span>Основа</span><div class="chips">${[['otm', 'OpenTopoMap'], ['gsh', 'Генштаб, где он есть']].map(([v, t]) => `<button class="chip${(sh.base || 'otm') === v ? ' on' : ''}" data-a="sbase" data-v="${v}">${t}</button>`).join('')}</div>
+      <div class="field"><span>Основа</span><div class="chips">${[['otm', 'OpenTopoMap'], ['gsh', 'Генштаб и ГГЦ, где есть']].map(([v, t]) => `<button class="chip${(sh.base || 'otm') === v ? ' on' : ''}" data-a="sbase" data-v="${v}">${t}</button>`).join('')}</div>
         <div class="hint">OpenTopoMap есть везде. Генштаб подробнее в горах, но покрывает не всё — где его нет, подставится OpenTopoMap.</div></div>
       ${pr.points.some(q => q.type === 'photo') ? `<label class="switch"><input type="checkbox" data-c="sheet" data-f="photos" ${sh.photos !== false ? 'checked' : ''}>Фототочки на картах дней и рабочих листах</label>` : ''}
       <label class="switch logo-opt"><input type="checkbox" data-c="sheet" data-f="logo" ${sh.logo !== false ? 'checked' : ''}><img src="/static/img/logo-s.png" alt=""><span><b>Логотип «Восхождения»</b><div class="hint">в правом нижнем углу каждого листа</div></span></label>
@@ -876,10 +876,16 @@ function destroyMap() { if (map) { map.remove(); map = null; } markers = {}; lin
 // Слой карты. Если плитка не пришла (внешний сервер карты не ответил), просим её ещё до четырёх раз с паузами;
 // на последней попытке сервер отдаёт увеличенный кусок более мелкого зума — лучше мутно, чем дыра.
 function tiles(base, opts = {}) {
-  const l = L.tileLayer(`/tiles/${base}/{z}/{x}/{y}.png?v=3`, { maxNativeZoom: { otm: 17, gsh100: 14, esri: 17 }[base] || 17, maxZoom: 18, minZoom: 3, ...opts });
+  const l = L.tileLayer(`/tiles/${base}/{z}/{x}/{y}.png?v=5`, { maxNativeZoom: { otm: 17, gsh100: 15, esri: 17 }[base] || 17, maxZoom: 18, minZoom: 3, ...opts });
+  // тайла пока нет (OpenTopoMap дорисовывает крупный зум, сервер карты не ответил): сразу показываем увеличенный кусок
+  // более мелкого зума, а сам тайл спрашиваем ещё раз через 5, 15 и 30 секунд
   l.on('tileerror', e => {
-    const t = e.tile, n = t._retry || 0; if (n >= 4) return; t._retry = n + 1;
-    setTimeout(() => { if (t.parentNode) t.src = t.src.replace(/&r=\d+$/, '') + '&r=' + (n + 1); }, 700 * (n + 1));
+    const t = e.tile, src = t.getAttribute('src') || '';
+    if (src.endsWith('&r=oz')) return;      // не нашлось и замены — ждём повтора
+    const n = t._retry || 0; if (n >= 3) return; t._retry = n + 1;
+    const url = src.replace(/&r=\w+$/, '');
+    t.src = url + '&r=oz';
+    setTimeout(() => { if (t.parentNode) t.src = url + '&r=' + (n + 1); }, [5000, 15000, 30000][n]);
   });
   return l;
 }

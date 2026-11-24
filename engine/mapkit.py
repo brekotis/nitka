@@ -41,10 +41,29 @@ LAYERS = {
     'gsh100': ('https://a.tiles.nakarte.me/new_gsh_100k/{z}/{x}/{y}', True),   # новый Генштаб 1:100 000
     'topo500': ('https://a.tiles.nakarte.me/topo500/{z}/{x}/{y}', True),
     'topo1000': ('https://a.tiles.nakarte.me/topo1000/{z}/{x}/{y}', True),
+    'topo001m': ('https://a.tiles.nakarte.me/topo001m/{z}/{x}/{y}', True),
     'otm': ('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', False),
     'esri': ('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', False),
 }
 _lock = threading.Lock()
+
+# Топокарты на nakarte.me. Каждый слой покрывает только свои районы: «новый Генштаб» (gsh050/gsh100) — в основном Кавказ,
+# topo500/topo1000 и ГГЦ (ggc*) — остальное, причём пятнами. Поэтому основа собирается из первого слоя, который в этом месте есть.
+# Число в имени слоя nakarte — метров в сантиметре: 500 → 1:50 000, 1000 → 1:100 000, 2000 → 1:200 000.
+TOPO_NAME = {'gsh050': 'Генштаба 1:50 000', 'topo500': 'Генштаба 1:50 000', 'ggc500': 'ГГЦ 1:50 000', 'ggc250': 'ГГЦ 1:25 000',
+             'gsh100': 'Генштаба 1:100 000', 'topo1000': 'Генштаба 1:100 000', 'ggc1000': 'ГГЦ 1:100 000', 'ggc2000': 'ГГЦ 1:200 000',
+             'topo001m': '1:1 000 000'}
+TOPO_MAXZ = {'gsh050': 15, 'ggc250': 15, 'topo500': 14, 'ggc500': 14, 'gsh100': 14, 'topo1000': 13, 'ggc1000': 13, 'ggc2000': 12, 'topo001m': 10}
+TOPO_ORDER = {
+    50: ['gsh050', 'topo500', 'ggc500', 'ggc250', 'gsh100', 'topo1000', 'ggc1000', 'ggc2000', 'topo001m'],
+    100: ['gsh100', 'topo1000', 'ggc1000', 'gsh050', 'topo500', 'ggc500', 'ggc250', 'ggc2000', 'topo001m'],
+    200: ['ggc2000', 'gsh100', 'topo1000', 'ggc1000', 'topo001m'],
+}
+
+def topo_chain(z, prefer, max_up=2):
+    """Цепочка слоёв [(слой, зум)] для основы зума z: сначала карты масштаба prefer (50 | 100 | 200 тыс.),
+    потом остальные. Слой, который пришлось бы растягивать больше чем в 2**max_up раз, не берётся."""
+    return [(L, min(z, TOPO_MAXZ[L])) for L in TOPO_ORDER[prefer] if z - min(z, TOPO_MAXZ[L]) <= max_up]
 
 def get_tile(layer, z, x, y):
     path = os.path.join(CACHE, 'tiles', layer, str(z), str(x), f'{y}.png')
@@ -53,10 +72,10 @@ def get_tile(layer, z, x, y):
     data = fetch_tile(layer, z, x, y)      # пустая пометка «тайла нет» разбирается там же (у неё есть срок годности)
     return _rgb(Image.open(io.BytesIO(data))) if data else None
 
-def fetch_tile(layer, z, x, y, timeout=30, tries=3):
+def fetch_tile(layer, z, x, y, timeout=30, tries=3, fresh=False):
     """Скачивает тайл в кэш; возвращает байты, b'' — тайла точно нет, None — сервер карты не ответил (в кэш не пишется)."""
     path = os.path.join(CACHE, 'tiles', layer, str(z), str(x), f'{y}.png')
-    if os.path.exists(path):
+    if os.path.exists(path) and not (fresh and os.path.getsize(path) == 0):      # fresh — пометку «тайла нет» перепроверить
         # пометка «тайла нет» не вечна. OpenTopoMap рисует крупный зум по запросу: сначала отвечает 404,
         # а через несколько минут тайл уже есть — поэтому у него пометка живёт четверть часа, у остальных слоёв — две недели
         if os.path.getsize(path) or time.time() - os.path.getmtime(path) < (900 if layer == 'otm' else 14 * 86400):
@@ -118,6 +137,20 @@ class View:
         x, y = self.px(lat, lon)
         return -pad <= x <= self.W + pad and -pad <= y <= self.H + pad
 
+    def _present(self, layers, z, tx0, ty0, tx1, ty1):
+        """Отбрасывает слои, которых нет ни в одной из 25 проб по полю листа (последний слой цепочки остаётся всегда).
+        Проба — те же тайлы, что пойдут в мозаику, так что запросы не лишние."""
+        keep = []
+        for i, L in enumerate(layers):
+            lname, lz = (L, z) if isinstance(L, str) else L
+            if i == len(layers) - 1 or lname not in TOPO_MAXZ: keep.append(L); continue
+            d = 2 ** (z - lz)
+            probe = {((tx0 + (tx1 - tx0) * a // 4) // d, (ty0 + (ty1 - ty0) * b // 4) // d) for a in range(5) for b in range(5)}
+            with ThreadPoolExecutor(6) as ex:
+                if any(im is not None for im in ex.map(lambda xy: get_tile(lname, lz, *xy), probe)): keep.append(L)
+        self.layers_kept = [L if isinstance(L, str) else L[0] for L in keep]
+        return keep
+
     def basemap(self, layers, z, lighten=0.12, fallback_layers=None, shade=0.0, shade_z=12):
         """layers: список слоёв по приоритету; при отсутствии тайла берётся следующий слой."""
         world = 256 * 2 ** z
@@ -127,6 +160,9 @@ class View:
         X1 = X0 + self.W * self.res / t
         Y1 = Y0 + self.H * self.res / t
         tx0, ty0, tx1, ty1 = int(X0 // 256), int(Y0 // 256), int(X1 // 256), int(Y1 // 256)
+        if len(layers) > 1:
+            layers = self._present(layers, z, tx0, ty0, tx1, ty1)
+        self.layer_names = [L if isinstance(L, str) else L[0] for L in layers]      # номера в layer_use — по этому списку
         mosaic = Image.new('RGB', ((tx1 - tx0 + 1) * 256, (ty1 - ty0 + 1) * 256), (255, 255, 255))
         jobs = [(x, y) for x in range(tx0, tx1 + 1) for y in range(ty0, ty1 + 1)]
         missing = []; use = {}

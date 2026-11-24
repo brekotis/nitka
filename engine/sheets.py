@@ -79,37 +79,47 @@ class Builder:
             z = {10000: 17, 25000: 16, 50000: 15, 100000: 14, 200000: 13, 300000: 12, 500000: 11, 1000000: 10, 2000000: 9, 2500000: 8, 5000000: 7}[sc]
             # OpenTopoMap отдаёт крупный зум не везде (на севере и в глуши — 404): тогда берём тайл помельче и увеличиваем
             return dict(layers=['otm'] + [('otm', z - k) for k in (1, 2, 3, 4) if z - k >= 6], z=z, src='Основа: OpenTopoMap (© OpenStreetMap, SRTM).', lighten=0.14 if sc < 1000000 else 0.22, shade=0.0, shade_z=12)
-        tab = {
-            10000: ([('gsh050', 15), ('gsh100', 14), ('topo500', 14), ('otm', 15)], 17, '1:50 000', 13),
-            25000: ([('gsh050', 15), ('gsh100', 14), ('topo500', 14), ('otm', 15)], 16, '1:50 000', 13),
-            50000: (['gsh050', ('gsh100', 14), ('topo500', 14), 'otm'], 15, '1:50 000', 13),
-            100000: (['gsh100', ('topo1000', 13), 'otm'], 14, '1:100 000', 12),
-            200000: (['gsh100', ('topo1000', 12), 'otm'], 13, '1:100 000', 12),
-            300000: (['gsh100', ('topo1000', 12), 'otm'], 12, '1:100 000', 11),
-            500000: (['ggc500', ('ggc1000', 11), 'otm'], 12, '1:500 000', 10),
-        }
-        layers, z, name, sz = tab[sc]
-        zo = min(z, 15)      # последний запасной слой — OpenTopoMap; под ним — он же, но мельче
-        layers = layers + [('otm', zo - k) for k in (1, 2, 3) if zo - k >= 6]
-        return dict(layers=layers, z=z, src=f'Основа: топокарта Генштаба {name} (nakarte.me), отмывка рельефа — по ЦМР.', lighten=0.16 if sc <= 100000 else 0.22,
+        # зум мозаики, какие карты брать в первую очередь (тыс.), зум отмывки
+        z, prefer, sz = {10000: (17, 50, 13), 25000: (16, 50, 13), 50000: (15, 50, 13), 100000: (14, 100, 12),
+                         200000: (13, 100, 12), 300000: (12, 100, 11), 500000: (11, 200, 10)}[sc]
+        layers = mk.topo_chain(min(z, 15), prefer, max_up=2 if sc <= 50000 else 3)
+        zo = min(z, 15)      # где топокарт нет совсем — OpenTopoMap; под ним — он же, но мельче
+        layers = layers + [('otm', zo)] + [('otm', zo - k) for k in (1, 2, 3) if zo - k >= 6]
+        return dict(layers=layers, z=z, src='Основа: топокарты (nakarte.me), отмывка рельефа — по ЦМР.', lighten=0.16 if sc <= 100000 else 0.22,
                     shade=0.34 if sc <= 100000 else 0.38, shade_z=sz)
 
     def basemap(self, v, sc):
         s = self.style(sc)
         img = v.basemap(s['layers'], s['z'], lighten=s['lighten'], shade=s['shade'], shade_z=s['shade_z'])
         use = getattr(v, 'layer_use', {}); tot = sum(use.values()) or 1
-        names = [L if isinstance(L, str) else L[0] for L in s['layers']]
+        names = getattr(v, 'layer_names', None) or [L if isinstance(L, str) else L[0] for L in s['layers']]
         # основа целиком из OpenTopoMap, но часть тайлов пришлось взять мельче — он их ещё дорисовывает
         v.soft = len(getattr(v, 'fallback_tiles', [])) if names[0] == 'otm' else 0
         otm_use = sum(n for i, n in use.items() if i is not None and names[i] == 'otm')
-        if names[0] != 'otm' and otm_use > 0.6 * tot:
+        if self.base != 'otm' and otm_use > 0.6 * tot:
             # топокарт Генштаба на этот район нет — весь поход рисуем на OpenTopoMap, без двойной отмывки
             self.base = 'otm'; s = self.style(sc)
             img = v.basemap(s['layers'], s['z'], lighten=s['lighten'], shade=s['shade'], shade_z=s['shade_z'])
             v.soft = len(getattr(v, 'fallback_tiles', []))
-        elif len(names) > 1 and use.get(0, 0) < 0.5 * tot and 'Генштаба' in s['src']:
-            s = dict(s, src='Основа: топокарты Генштаба разных масштабов (nakarte.me), отмывка рельефа — по ЦМР.')
+        else:
+            s = dict(s, src=self.topo_src(names, use, tot))
         return img, s
+
+    @staticmethod
+    def topo_src(names, use, tot):
+        """Подпись основы по тому, из каких карт она собралась на самом деле (слои меньше 8% листа не называем)."""
+        share = {}
+        for i, n in use.items():
+            if i is None: continue
+            k = 'otm' if names[i] == 'otm' else mk.TOPO_NAME.get(names[i], names[i])
+            share[k] = share.get(k, 0) + n
+        main = [k for k, n in sorted(share.items(), key=lambda kv: -kv[1]) if n >= 0.08 * tot and k != 'otm']
+        if not main: return 'Основа: OpenTopoMap (© OpenStreetMap, SRTM).'
+        gs = [k[len('Генштаба '):] for k in main if k.startswith('Генштаба ')]; gg = [k[len('ГГЦ '):] for k in main if k.startswith('ГГЦ ')]
+        rest = [k for k in main if not k.startswith(('Генштаба ', 'ГГЦ '))]
+        parts = ([f'Генштаба {" и ".join(gs)}'] if gs else []) + ([f'ГГЦ {" и ".join(gg)}'] if gg else []) + rest
+        tail = ', местами OpenTopoMap' if share.get('otm', 0) >= 0.08 * tot else ''
+        return f'Основа: топокарты {", ".join(parts)} (nakarte.me){tail}, отмывка рельефа — по ЦМР.'
 
     # ---------------------------------------------------------------- план листов
     def plan(self):
