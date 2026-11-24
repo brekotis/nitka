@@ -1,0 +1,8 @@
+data/
+__pycache__/
+*.pyc
+tests/
+deploy/tls/
+deploy/SERVER.md
+web/img/logo-src.png
+.venv/
