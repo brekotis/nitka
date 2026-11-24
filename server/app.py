@@ -165,6 +165,7 @@ def merge_client(stored, incoming):
         try: meta['kcoef'] = min(3.0, max(1.0, float(im['kcoef'])))
         except Exception: pass
     if 'radial_one_way' in im: meta['radial_one_way'] = bool(im['radial_one_way'])
+    if 'no_passes' in im: meta['no_passes'] = bool(im['no_passes'])      # по каталогу перевалов уже искали — у нитки ничего нет
     if im.get('elev') in ('auto', 'dem', 'track'): meta['elev'] = im['elev']
     sheets = dict(stored.get('sheets', {}))
     for k, v in (incoming.get('sheets') or {}).items():

@@ -626,7 +626,7 @@ function todos() {
   if (bad.length) out.push({ step: 'days', fix: 'order', text: `${bad.length > 1 ? 'В днях' : 'В дне'} ${bad.join(', ')} куски нитки стоят не по ходу движения — из-за этого появляются ложные переезды`, btn: 'Расставить по ходу' });
   if (!pr.meta.start_date) out.push({ step: 'days', text: 'Не указана дата первого дня — на картах не будет дат', btn: 'Указать' });
   if (M.max > 1 && !pts.some(q => q.type === 'camp')) out.push({ step: 'points', tab: 'points', run: 'camps', text: 'Ночёвки не отмечены — могу поставить их в концах дней', btn: 'Предложить ночёвки' });
-  if (showObst() && !objs.length) out.push({ step: 'points', tab: 'obst', run: 'passes', text: 'Перевалы и вершины не отмечены — найду их по каталогу, с категориями и высотами', btn: 'Найти перевалы' });
+  if (askPasses() && !objs.length) out.push({ step: 'points', tab: 'obst', run: 'passes', text: 'Перевалы и вершины не отмечены — найду их по каталогу, с категориями и высотами', btn: 'Найти перевалы' });
   const ng = objs.filter(q => q.type === 'pass' && !q.grade && q.on_map !== false).length;
   if (ng) out.push({ step: 'points', tab: 'obst', text: `У ${ng} ${plural(ng, 'перевала', 'перевалов', 'перевалов')} не указана категория`, btn: 'Проставить' });
   const cs = pts.filter(q => q.type === 'campsite' && campDate(q));
@@ -687,7 +687,10 @@ function todoBlock(list, title) {
   return `<div class="todo"><h3>${title}</h3>${list.map(t => `<div class="todo-i"><i class="bang">!</i><span>${esc(t.text)}</span><button class="btn sm go" data-a="todo" data-i="${t.i}">${esc(t.btn)}</button></div>`).join('')}</div>`;
 }
 function markSteps() { const st = new Set(todos().map(t => t.step)); $$('.step').forEach(b => b.classList.toggle('att', st.has(b.dataset.step) && b.dataset.step !== S.step)); }
-const showObst = () =>['горный', 'пеший'].includes(P().meta.kind) || P().points.some(q => S.obj.includes(q.type));
+// препятствия бывают в любом походе (перевалы — и в лыжном, и в вело), поэтому вкладка есть всегда;
+// подсказку «найти перевалы» не показываем только на воде и после поиска, который ничего не нашёл
+const showObst = () => true;
+const askPasses = () => P().meta.kind !== 'водный' && !P().meta.no_passes;
 const gbadge = g => `<span class="gb" style="--g:${S.gcol[g] || '#8A97A8'}">${g || '—'}</span>`;
 function routeOrder(list) {
   const chains = dayChains(); const days = Object.keys(chains).map(Number).sort((a, b) => a - b);
@@ -1089,7 +1092,10 @@ const A = {
     let items;
     try { items = (await api('POST', `/api/projects/${S.pid}/suggest`, { what }, false, what === 'passes' ? 'Сверяю нитку с каталогом перевалов…' : 'Смотрю, где заканчиваются дни…')).items; } catch (e) { el.disabled = false; return fail(e); }
     el.disabled = false;
-    if (!items.length) return toast(what === 'camps' ? 'Все ночёвки в концах дней уже отмечены' : 'В каталоге нет перевалов у нитки, которых ещё нет в походе');
+    if (!items.length) {
+      if (what === 'passes' && !P().meta.no_passes) { P().meta.no_passes = true; dirty(); paintPanel(); }      // искали — рядом с ниткой ничего нет: больше не напоминаем
+      return toast(what === 'camps' ? 'Все ночёвки в концах дней уже отмечены' : 'В каталоге нет перевалов у нитки, которых ещё нет в походе');
+    }
     const dmy = d => d ? d.slice(8, 10) + '.' + d.slice(5, 7) : '';
     const row = (o, i) => what === 'camps'
       ? `<label class="srow"><input type="checkbox" data-i="${i}" checked><span class="ico">${sym('camp')}</span><span><div class="t">${o.date ? 'Ночёвка ' + dmy(o.date) : 'Ночёвка после дня ' + o.after_day}${o.nights > 1 ? ` · ${o.nights} ночи` : ''}</div><div class="s">${esc(o.note)}</div></span></label>`

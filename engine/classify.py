@@ -309,6 +309,7 @@ def _pts_out(seg):
 def merge_import(proj, layers, src_name):
     """Добавляет слои в проект. Возвращает сводку: что нашлось."""
     meta = proj['meta']
+    meta.pop('no_passes', None)      # нитка меняется — перевалы по каталогу стоит поискать заново
     sid = uid()
     # год: из start_date, из названий точек, из времени GPS, иначе текущий
     year = int(meta['start_date'][:4]) if meta.get('start_date') else None
