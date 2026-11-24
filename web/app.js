@@ -12,16 +12,31 @@ const km = (v, n = 1) => (Math.round(v * 10 ** n) / 10 ** n).toFixed(n).replace(
 const plural = (n, a, b, c) => { n = Math.abs(n); const x = n % 10, y = n % 100; return x === 1 && y !== 11 ? a : (x >= 2 && x <= 4 && !(y >= 12 && y <= 14) ? b : c); };
 
 // ---------------------------------------------------------------- сеть
-async function api(method, url, body, raw) {
+const LOADS = []; let loadT = 0, lastBtn = null, lastBtnAt = 0;
+function loadPaint() {
+  const el = $('#load'); if (!el) return;
+  if (!LOADS.length) { clearTimeout(loadT); loadT = 0; el.hidden = true; $$('.loading').forEach(b => b.classList.remove('loading')); return; }
+  const msg = [...LOADS].reverse().find(x => x.msg); $('span', el).textContent = (msg && msg.msg) || 'Секунду…';
+  if (el.hidden && !loadT) loadT = setTimeout(() => { loadT = 0; if (LOADS.length) el.hidden = false; }, 220);      // быстрые запросы индикатор не дёргают
+}
+function loadOn(msg) {
+  const t = { msg }; LOADS.push(t);
+  if (lastBtn && Date.now() - lastBtnAt < 600 && lastBtn.isConnected) lastBtn.classList.add('loading');      // кнопка, которую только что нажали, показывает, что работает
+  loadPaint(); return () => { const i = LOADS.indexOf(t); if (i >= 0) LOADS.splice(i, 1); loadPaint(); };
+}
+async function api(method, url, body, raw, msg) {
   const o = { method, headers: {}, credentials: 'same-origin' };
   if (raw) o.body = body; else if (body !== undefined) { o.body = JSON.stringify(body); o.headers['Content-Type'] = 'application/json'; }
-  let r;
-  try { r = await fetch(url, o); } catch (e) { throw new Error('Нет связи с сервером. Проверь интернет и попробуй ещё раз.'); }
-  let d = {};
-  try { d = await r.json(); } catch (e) { /* пусто */ }
-  if (r.status === 401 && S.user) { S.user = null; go('#/'); render(); }
-  if (!r.ok) throw new Error(d.error || `Ошибка ${r.status}`);
-  return d;
+  const off = msg === false ? null : loadOn(msg);
+  try {
+    let r;
+    try { r = await fetch(url, o); } catch (e) { throw new Error('Нет связи с сервером. Проверь интернет и попробуй ещё раз.'); }
+    let d = {};
+    try { d = await r.json(); } catch (e) { /* пусто */ }
+    if (r.status === 401 && S.user) { S.user = null; go('#/'); render(); }
+    if (!r.ok) throw new Error(d.error || `Ошибка ${r.status}`);
+    return d;
+  } finally { off && off(); }
 }
 function toast(msg, err) {
   const t = document.createElement('div'); t.className = 'toast' + (err ? ' err' : ''); t.textContent = msg; $('#toasts').append(t);
@@ -88,7 +103,7 @@ async function renderAdmin() {
   destroyAtlas();
   document.title = 'Нитка — кто пользуется';
   const bar = topBar(`<span class="sp"></span><button class="btn ghost sm" data-a="home">← Мои походы</button>`);
-  let st; try { st = await api('GET', '/api/admin/state'); } catch (e) { fail(e); return go('#/'); }
+  let st; try { st = await api('GET', '/api/admin/state', undefined, false, 'Открываю список…'); } catch (e) { fail(e); return go('#/'); }
   if (!st.unlocked) {
     app.innerHTML = bar + `<main class="home origin"><div class="home-head"><div><h1>${st.code_set ? 'Код администратора' : 'Придумай код администратора'}</h1>
       <p>${st.code_set ? 'Список пользователей открывается только по коду — на этом устройстве он спросится один раз.' : 'Вход на сайт — по имени, а имя brekotis известно всем. Чтобы список пользователей не открыл кто угодно, он закрыт отдельным кодом. Придумай его сейчас — хотя бы четыре символа.'}</p></div></div>
@@ -97,7 +112,7 @@ async function renderAdmin() {
     $('#admf').onsubmit = async e => { e.preventDefault(); try { await api('POST', '/api/admin/code', { code: e.target.code.value }); renderAdmin(); } catch (err) { fail(err); e.target.code.select(); } };
     return;
   }
-  let users; try { users = (await api('GET', '/api/admin/users')).users; } catch (e) { fail(e); return go('#/'); }
+  let users; try { users = (await api('GET', '/api/admin/users', undefined, false, 'Загружаю список…')).users; } catch (e) { fail(e); return go('#/'); }
   const dt = t => t ? new Date(t * 1000).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
   const by = {}; users.forEach(u => { const k = u.origin || 'не указано'; by[k] = (by[k] || 0) + 1; });
   app.innerHTML = bar + `<main class="home"><div class="home-head"><div><h1>Кто пользуется</h1>
@@ -110,7 +125,7 @@ async function renderAdmin() {
 }
 async function boot() {
   try {
-    const [me, ty] = await Promise.all([api('GET', '/api/me'), api('GET', '/api/types')]);
+    const [me, ty] = await Promise.all([api('GET', '/api/me', undefined, false, false), api('GET', '/api/types', undefined, false, false)]);
     S.user = me.user; S.cfg = me; S.types = ty.types; S.grades = ty.grades; S.obj = ty.obj; S.bands = ty.bands || []; S.gcol = ty.grade_col || {};
   } catch (e) { fail(e); }
   route();
@@ -202,7 +217,7 @@ function renderLogin() {
   $('#login').onsubmit = async e => {
     e.preventDefault(); const f = e.target; const name = f.name.value.trim();
     try {
-      const d = await api('POST', '/api/login', { name, code: f.code ? f.code.value : '' });
+      const d = await api('POST', '/api/login', { name, code: f.code ? f.code.value : '' }, false, 'Вхожу…');
       localStorage.nitkaName = name; S.user = d.user; S.isNew = d.new;
       toast(d.new ? `Приятно познакомиться, ${d.user.name}!` : `С возвращением, ${d.user.name}!`);
       route();
@@ -232,7 +247,7 @@ function renderOrigin() {
 }
 
 // ---------------------------------------------------------------- мои походы
-async function loadProjects() { try { S.projects = (await api('GET', '/api/projects')).projects; } catch (e) { fail(e); } }
+async function loadProjects() { try { S.projects = (await api('GET', '/api/projects', undefined, false, 'Загружаю походы…')).projects; } catch (e) { fail(e); } }
 function topBar(inner = '') {
   return `<header class="top"><a class="brand" data-a="home" title="Мои походы"><span class="badge"><img src="/static/img/logo-s.png" alt=""></span><span>Нитка</span></a>${inner}</header>`;
 }
@@ -340,7 +355,7 @@ function newProject() {
     $$('.chip', v).forEach(c => c.onclick = () => { $$('.chip', v).forEach(x => x.classList.remove('on')); c.classList.add('on'); });
     $('#np', v).onsubmit = async e => {
       e.preventDefault();
-      try { const d = await api('POST', '/api/projects', { title: e.target.title.value, kind: e.target.kind.value }); close(); go(`#/p/${d.id}/tracks`); } catch (err) { fail(err); }
+      try { const d = await api('POST', '/api/projects', { title: e.target.title.value, kind: e.target.kind.value }, false, 'Создаю поход…'); close(); go(`#/p/${d.id}/tracks`); } catch (err) { fail(err); }
     };
   });
 }
@@ -355,14 +370,14 @@ async function flush() {
   if (!dirtyFlag || !S.proj) return;
   dirtyFlag = false;
   const body = { ...S.proj, pieces: S.proj.pieces.map(({ pts, ...p }) => p) };
-  saving = api('PUT', `/api/projects/${S.pid}`, body).then(() => { if (!dirtyFlag) setSaved('', 'сохранено'); }, e => { dirtyFlag = true; setSaved('bad', 'не сохранилось'); fail(e); }).finally(() => { saving = null; });
+  saving = api('PUT', `/api/projects/${S.pid}`, body, false, false).then(() => { if (!dirtyFlag) setSaved('', 'сохранено'); }, e => { dirtyFlag = true; setSaved('bad', 'не сохранилось'); fail(e); }).finally(() => { saving = null; });
   await saving;
 }
 window.addEventListener('beforeunload', e => { if (dirtyFlag) { flush(); e.preventDefault(); e.returnValue = ''; } });
 async function openProject(pid, step) {
   await flush();
   try {
-    const d = await api('GET', `/api/projects/${pid}`);
+    const d = await api('GET', `/api/projects/${pid}`, undefined, false, 'Открываю поход…');
     S.pid = pid; S.proj = d.project; S.build = d.build; S.step = step; S.selPiece = S.selPoint = null; S.filter = 'all'; S.folder = ''; S.q = ''; S.lastInfo = null; S.mode = null; S.selBand = null; S.bandA = null; S.ptab = 'points';
     if (!S.proj.pieces.length) S.step = 'tracks';
     destroyAtlas(); renderEditor();
@@ -479,7 +494,7 @@ function bindDrop() {
   ['dragleave', 'drop'].forEach(n => d.addEventListener(n, e => { e.preventDefault(); d.classList.remove('over'); }));
   d.addEventListener('drop', e => upload([...e.dataTransfer.files]));
   $('#linkf').onsubmit = async e => { e.preventDefault(); const v = e.target.link.value.trim(); if (!v) return; S.lastInfo = null;
-    if (await importOne(() => api('POST', `/api/projects/${S.pid}/import`, { link: v }))) { toast('Трек по ссылке загружен'); paintPanel(true); drawMap(true); } };
+    if (await importOne(() => api('POST', `/api/projects/${S.pid}/import`, { link: v }, false, 'Скачиваю трек с nakarte.me и разбираю его…'))) { toast('Трек по ссылке загружен'); paintPanel(true); drawMap(true); } };
 }
 async function importOne(call) {
   await flush(); const d = $('#drop'); d && d.classList.add('busy');
@@ -493,7 +508,10 @@ async function importOne(call) {
 async function upload(files) {
   if (!files.length) return; S.lastInfo = null; let ok = 0;
   files.sort((a, b) => a.name.localeCompare(b.name, 'ru', { numeric: true }));
-  for (const f of files) { if (await importOne(() => api('POST', `/api/projects/${S.pid}/import?name=${encodeURIComponent(f.name)}`, f, true))) ok++; }
+  for (const [i, f] of files.entries()) {
+    const msg = `Читаю «${f.name}»${files.length > 1 ? ` — ${i + 1} из ${files.length}` : ''}${f.size > 3e6 ? ' (файл большой, это может занять полминуты)' : ''}…`;
+    if (await importOne(() => api('POST', `/api/projects/${S.pid}/import?name=${encodeURIComponent(f.name)}`, f, true, msg))) ok++;
+  }
   if (ok) { toast(ok > 1 ? `Загружено файлов: ${ok}` : 'Трек загружен'); paintPanel(true); drawMap(true); }
 }
 
@@ -649,7 +667,7 @@ function badOrderDays() {
 }
 async function fixOrder() {
   await flush();
-  try { const r = await api('POST', `/api/projects/${S.pid}/chain-order`); S.proj = r.project; toast(r.changed ? 'Куски расставлены по ходу движения. Пересобери карты — профиль и листы изменятся.' : 'Порядок уже верный'); paintPanel(); drawMap(); } catch (e) { fail(e); }
+  try { const r = await api('POST', `/api/projects/${S.pid}/chain-order`, undefined, false, 'Расставляю куски по ходу…'); S.proj = r.project; toast(r.changed ? 'Куски расставлены по ходу движения. Пересобери карты — профиль и листы изменятся.' : 'Порядок уже верный'); paintPanel(); drawMap(); } catch (e) { fail(e); }
 }
 function fixCamps() {
   const pts = P().points; const made = [];
@@ -817,7 +835,7 @@ function startPoll() {
   pollT = setInterval(async () => {
     if (!S.pid) return stopPoll();
     try {
-      const b = await api('GET', `/api/projects/${S.pid}/status`); const was = JSON.stringify(S.build); S.build = b;
+      const b = await api('GET', `/api/projects/${S.pid}/status`, undefined, false, false); const was = JSON.stringify(S.build); S.build = b;
       if (!['running', 'queued'].includes(b.state)) { stopPoll(); if (b.state === 'done') toast('Карты готовы!'); }
       syncDl(); if (S.step === 'maps' && JSON.stringify(b) !== was) updateBuild();
     } catch (e) { /* подождём */ }
@@ -845,7 +863,7 @@ function lightbox(i) {
 }
 async function build(only) {
   await flush();
-  try { const r = await api('POST', `/api/projects/${S.pid}/build`, { only }); S.build = r.build; syncDl(); updateBuild(); startPoll(); } catch (e) { fail(e); }
+  try { const r = await api('POST', `/api/projects/${S.pid}/build`, { only }, false, 'Ставлю сборку в очередь…'); S.build = r.build; syncDl(); updateBuild(); startPoll(); } catch (e) { fail(e); }
 }
 
 // ---------------------------------------------------------------- карта
@@ -915,7 +933,7 @@ async function mapClick(latlng) {
   if (S.mode === 'cut') {
     setMode(null); await flush();
     try {
-      const r = await api('POST', `/api/projects/${S.pid}/cut`, { piece: n.piece.id, lat: n.lat, lon: n.lon });
+      const r = await api('POST', `/api/projects/${S.pid}/cut`, { piece: n.piece.id, lat: n.lat, lon: n.lon }, false, 'Режу нитку…');
       S.proj = r.project; toast(r.msg, !r.ok); if (r.ok) S.selPiece = r.new;
       paintPanel(); drawMap(); const row = $(`.pc[data-id="${S.selPiece}"]`); row && row.scrollIntoView({ block: 'center', behavior: 'smooth' });
     } catch (e) { fail(e); }
@@ -1018,7 +1036,7 @@ const A = {
     m.onclick = async e => { const a = e.target.dataset.m; if (!a) return;
       if (a === 'zip') location.href = `/api/projects/${id}/zip?fmt=png`;
       if (a === 'open') go(`#/p/${id}/tracks`); if (a === 'maps') go(`#/p/${id}/maps`);
-      if (a === 'copy') { try { await api('POST', `/api/projects/${id}/copy`); await loadProjects(); renderHome(); toast('Копия готова'); } catch (er) { fail(er); } }
+      if (a === 'copy') { try { await api('POST', `/api/projects/${id}/copy`, undefined, false, 'Делаю копию…'); await loadProjects(); renderHome(); toast('Копия готова'); } catch (er) { fail(er); } }
       if (a === 'del') confirmBox('Удалить поход?', `«${esc(p.title)}» исчезнет вместе с треками и собранными картами. Вернуть будет нельзя.`, 'Удалить', async () => { try { await api('DELETE', `/api/projects/${id}`); await loadProjects(); renderHome(); toast('Поход удалён'); } catch (er) { fail(er); } }); };
   },
   step(el) { go(`#/p/${S.pid}/${el.dataset.step}`); },
@@ -1031,7 +1049,7 @@ const A = {
   pmove(el) { const p = pieceById(el.dataset.id); const sib = P().pieces.filter(x => x.day === p.day && (x.role === 'skip') === (p.role === 'skip')).sort((a, b) => a.order - b.order); const i = sib.indexOf(p), j = i + +el.dataset.d;
     if (j < 0 || j >= sib.length) return; [p.order, sib[j].order] = [sib[j].order, p.order]; if (p.order === sib[j].order) p.order += +el.dataset.d * .5; dirty(); paintPanel(); },
   kcoef(el) { P().meta.kcoef = +el.dataset.v; dirty(); paintPanel(); },
-  async 'split-camps'() { await flush(); try { const r = await api('POST', `/api/projects/${S.pid}/split-by-camps`); S.proj = r.project; toast(r.msg, !r.ok); paintPanel(); drawMap(); } catch (e) { fail(e); } },
+  async 'split-camps'() { await flush(); try { const r = await api('POST', `/api/projects/${S.pid}/split-by-camps`, undefined, false, 'Режу нитку по ночёвкам…'); S.proj = r.project; toast(r.msg, !r.ok); paintPanel(); drawMap(); } catch (e) { fail(e); } },
   'each-day'() { const M = daysModel(); let n = M.max; M.loose.forEach(p => { p.day = ++n; }); dirty(); paintPanel(); drawPieces(); },
   filter(el) { S.filter = el.dataset.f; S.selPoint = null; paintPanel(true); drawPoints(); },
   psel(el, ev) { if (ev.target.closest('[data-a="peye"]')) return A.peye(ev.target.closest('[data-a="peye"]'));
@@ -1069,7 +1087,7 @@ const A = {
   async sugg(el) {
     const what = el.dataset.w; await flush(); el.disabled = true;
     let items;
-    try { items = (await api('POST', `/api/projects/${S.pid}/suggest`, { what })).items; } catch (e) { el.disabled = false; return fail(e); }
+    try { items = (await api('POST', `/api/projects/${S.pid}/suggest`, { what }, false, what === 'passes' ? 'Сверяю нитку с каталогом перевалов…' : 'Смотрю, где заканчиваются дни…')).items; } catch (e) { el.disabled = false; return fail(e); }
     el.disabled = false;
     if (!items.length) return toast(what === 'camps' ? 'Все ночёвки в концах дней уже отмечены' : 'В каталоге нет перевалов у нитки, которых ещё нет в походе');
     const dmy = d => d ? d.slice(8, 10) + '.' + d.slice(5, 7) : '';
@@ -1128,6 +1146,13 @@ const C = {
   area(el) { P().meta.area = el.value; dirty(); },
   sheet(el) { P().sheets[el.dataset.f] = el.checked; dirty(); },
 };
+document.addEventListener('click', e => {
+  const b = e.target.closest('button, .btn, .chip'); if (b) { lastBtn = b; lastBtnAt = Date.now(); }
+  const a = e.target.closest('a[href]'); const h = a ? a.getAttribute('href') : '';
+  if (h.includes('/zip?')) toast('Собираю архив — скачивание начнётся через несколько секунд, не закрывай страницу');
+  else if (/\.jpg\?dl=1$/.test(h)) toast('Готовлю JPG — скачивание начнётся через пару секунд');
+}, true);
+document.addEventListener('submit', e => { const b = e.target.querySelector('button:not([type=button])'); if (b) { lastBtn = b; lastBtnAt = Date.now(); } }, true);
 app.addEventListener('click', e => { const el = e.target.closest('[data-a]'); if (el && A[el.dataset.a]) { if (el.tagName === 'A') e.preventDefault(); A[el.dataset.a](el, e); } });
 app.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.matches('.card[data-a]')) A.open(e.target); if (e.key === 'Enter' && e.target.matches('input.title')) e.target.blur(); });
 app.addEventListener('input', e => { const el = e.target.closest('[data-c]'); if (el && C[el.dataset.c] && el.matches('input[type=text],input[type=number],input.title,input:not([type])')) C[el.dataset.c](el, false); });
@@ -1136,6 +1161,8 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape' && S.mode) { 
 boot();
 // кнопка-подсказка «ещё ниже» живёт вне приложения, чтобы не перерисовываться вместе с панелью
 {
+  const ld = document.createElement('div'); ld.id = 'load'; ld.hidden = true; ld.setAttribute('role', 'status'); ld.setAttribute('aria-live', 'polite');
+  ld.innerHTML = '<i class="lbar"></i><div class="lpill"><img src="/static/img/logo-s.png" alt=""><span>Секунду…</span></div>'; document.body.append(ld);
   const b = document.createElement('button'); b.id = 'more'; b.hidden = true; b.type = 'button'; b.textContent = 'ещё ниже ↓';
   b.addEventListener('click', () => { const el = scroller(); el && el.scrollBy({ top: el.clientHeight * 0.75, behavior: 'smooth' }); });
   document.body.append(b);
