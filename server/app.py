@@ -18,6 +18,8 @@ PORT = int(os.environ.get('NITKA_PORT') or 8080)
 HOST = os.environ.get('NITKA_HOST') or '127.0.0.1'
 CODE = (os.environ.get('NITKA_CODE') or '').strip()
 KEEP_DAYS = float(os.environ.get('NITKA_KEEP_DAYS') or 7)
+ADMINS = {x.strip().lower() for x in (os.environ.get('NITKA_ADMINS') or 'name:brekotis').split(',') if x.strip()}      # кому видна страница «Кто пользуется»
+ADMIN_TRIES = {}
 MAX_BODY = 45 * 1024 * 1024
 TILE_LAYERS = {'otm': 17, 'gsh100': 14, 'gsh050': 15, 'esri': 17, 'topo500': 14, 'topo1000': 13}
 TILE_CAP = 6 * 1024 ** 3
@@ -49,6 +51,7 @@ def init_db():
       CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, key TEXT UNIQUE, name TEXT, created REAL, seen REAL);
       CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, user_id INTEGER, title TEXT, json TEXT, card TEXT, created REAL, updated REAL);
       CREATE INDEX IF NOT EXISTS projects_user ON projects(user_id, updated);
+      CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
     ''')
     if 'origin' not in [r[1] for r in c.execute('PRAGMA table_info(users)')]:
         c.execute('ALTER TABLE users ADD COLUMN origin TEXT')        # «откуда вы» — турклуб, город и т. п.
@@ -65,6 +68,20 @@ def user_key(name):
 
 def sign(uid):
     return f'{uid}.' + hmac.new(SECRET, str(uid).encode(), hashlib.sha256).hexdigest()[:32]
+
+def adm_token(uid):
+    return hmac.new(SECRET, f'adm:{uid}'.encode(), hashlib.sha256).hexdigest()[:40]
+
+def code_hash(code, salt=None):
+    salt = salt or secrets.token_hex(8)
+    return salt + ':' + hashlib.pbkdf2_hmac('sha256', code.encode(), bytes.fromhex(salt), 120000).hex()
+
+def setting(key, value=None):
+    c = db()
+    if value is None:
+        r = c.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
+        return r['value'] if r else None
+    c.execute('INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', (key, value)); c.commit()
 
 def unsign(tok):
     try:
@@ -316,6 +333,18 @@ class H(BaseHTTPRequestHandler):
             if k == 'nitka': return unsign(v)
         return None
 
+    def cookie(self, name):
+        for part in (self.headers.get('Cookie') or '').split(';'):
+            k, _, v = part.strip().partition('=')
+            if k == name: return v
+        return ''
+
+    def need_admin(self, unlocked=True):
+        uid = self.need_user(); r = db().execute('SELECT key FROM users WHERE id=?', (uid,)).fetchone()
+        if not r or r['key'] not in ADMINS: raise Err(404, 'Нет такого адреса.')
+        if unlocked and not hmac.compare_digest(self.cookie('nitka_adm'), adm_token(uid)): raise Err(403, 'Нужен код администратора.')
+        return uid
+
     def need_user(self):
         u = self.uid()
         if not u or not db().execute('SELECT 1 FROM users WHERE id=?', (u,)).fetchone(): raise Err(401, 'Нужно войти.')
@@ -361,7 +390,7 @@ class H(BaseHTTPRequestHandler):
     def api(self, m, a, q):
         if a == ['me']:
             u = self.uid(); r = db().execute('SELECT * FROM users WHERE id=?', (u,)).fetchone() if u else None
-            return self.send(200, dict(user=dict(name=r['name'], origin=r['origin'] or '') if r else None, need_code=bool(CODE), keep_days=KEEP_DAYS))
+            return self.send(200, dict(user=dict(name=r['name'], origin=r['origin'] or '', admin=r['key'] in ADMINS) if r else None, need_code=bool(CODE), keep_days=KEEP_DAYS))
         if a == ['login'] and m == 'POST':
             d = self.json(); name = str(d.get('name') or '')
             key, shown = user_key(name)
@@ -376,9 +405,36 @@ class H(BaseHTTPRequestHandler):
             else:
                 c.execute('UPDATE users SET seen=? WHERE id=?', (time.time(), r['id'])); c.commit(); new = False
             n = c.execute('SELECT COUNT(*) FROM projects WHERE user_id=?', (r['id'],)).fetchone()[0]
-            return self.send(200, dict(user=dict(name=r['name'], origin=r['origin'] or ''), new=new, projects=n),
+            return self.send(200, dict(user=dict(name=r['name'], origin=r['origin'] or '', admin=r['key'] in ADMINS), new=new, projects=n),
                              headers={'Set-Cookie': f'nitka={sign(r["id"])}; Path=/; Max-Age=63072000; HttpOnly; SameSite=Lax'
                                       + ('; Secure' if self.headers.get('X-Forwarded-Proto') == 'https' else '')})
+        if a == ['admin', 'state'] and m == 'GET':
+            uid = self.need_admin(unlocked=False)
+            return self.send(200, dict(code_set=bool(setting('admin_code')), unlocked=hmac.compare_digest(self.cookie('nitka_adm'), adm_token(uid))))
+        if a == ['admin', 'code'] and m == 'POST':
+            uid = self.need_admin(unlocked=False); code = str(self.json().get('code') or '').strip(); now = time.time()
+            t = [x for x in ADMIN_TRIES.get(uid, []) if now - x < 600]
+            if len(t) >= 6: raise Err(429, 'Слишком много попыток — подожди десять минут.')
+            saved = setting('admin_code')
+            if not saved:
+                if len(code) < 4: raise Err(400, 'Код — хотя бы четыре символа.')
+                setting('admin_code', code_hash(code))
+            elif not hmac.compare_digest(code_hash(code, saved.split(':')[0]), saved):
+                ADMIN_TRIES[uid] = t + [now]; raise Err(403, 'Код не подошёл.')
+            ADMIN_TRIES.pop(uid, None)
+            return self.send(200, dict(ok=True), headers={'Set-Cookie': f'nitka_adm={adm_token(uid)}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax'
+                                                          + ('; Secure' if self.headers.get('X-Forwarded-Proto') == 'https' else '')})
+        if a == ['admin', 'users'] and m == 'GET':
+            self.need_admin()
+            out = []
+            for u in db().execute('SELECT * FROM users ORDER BY created DESC').fetchall():
+                ps = []
+                for pr in db().execute('SELECT id, title, card, updated FROM projects WHERE user_id=? ORDER BY updated DESC', (u['id'],)).fetchall():
+                    k = json.loads(pr['card'] or '{}'); st = build_status(pr['id'])
+                    ps.append(dict(title=pr['title'], ndays=k.get('ndays', 0), km=k.get('km', 0), points=k.get('points', 0), kind=k.get('kind', ''), updated=pr['updated'],
+                                   built=sum(1 for x in st.get('sheets', []) if x.get('state') == 'ok'), state=st.get('state')))
+                out.append(dict(name=u['name'], by='телефон' if u['key'].startswith('tel:') else 'имя', origin=u['origin'] or '', created=u['created'], seen=u['seen'], projects=ps))
+            return self.send(200, dict(users=out))
         if a == ['profile'] and m == 'POST':
             uid = self.need_user(); origin = re.sub(r'\s+', ' ', str(self.json().get('origin') or '')).strip()[:80]
             if len(origin) < 2: raise Err(400, 'Напиши пару слов: турклуб, город или «сам по себе».')

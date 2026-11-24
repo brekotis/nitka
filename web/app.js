@@ -80,7 +80,32 @@ async function route() {
   }
   await flush();
   S.pid = null; S.proj = null; stopPoll(); destroyMap();
+  if (location.hash.startsWith('#/admin') && S.user.admin) return renderAdmin();
   await loadProjects(); render();
+}
+// ---------------------------------------------------------------- «Кто пользуется» — только для администратора, под отдельным кодом
+async function renderAdmin() {
+  document.title = 'Нитка — кто пользуется';
+  const bar = topBar(`<span class="sp"></span><button class="btn ghost sm" data-a="home">← Мои походы</button>`);
+  let st; try { st = await api('GET', '/api/admin/state'); } catch (e) { fail(e); return go('#/'); }
+  if (!st.unlocked) {
+    app.innerHTML = bar + `<main class="home origin"><div class="home-head"><div><h1>${st.code_set ? 'Код администратора' : 'Придумай код администратора'}</h1>
+      <p>${st.code_set ? 'Список пользователей открывается только по коду — на этом устройстве он спросится один раз.' : 'Вход на сайт — по имени, а имя brekotis известно всем. Чтобы список пользователей не открыл кто угодно, он закрыт отдельным кодом. Придумай его сейчас — хотя бы четыре символа.'}</p></div></div>
+      <form id="admf" class="sec" style="max-width:420px"><label class="field"><span>Код</span><input name="code" type="password" autocomplete="${st.code_set ? 'current-password' : 'new-password'}" maxlength="80" ${isPhone() ? '' : 'autofocus'}></label>
+      <div><button class="btn go big">${st.code_set ? 'Открыть' : 'Запомнить код'} →</button></div></form></main>`;
+    $('#admf').onsubmit = async e => { e.preventDefault(); try { await api('POST', '/api/admin/code', { code: e.target.code.value }); renderAdmin(); } catch (err) { fail(err); e.target.code.select(); } };
+    return;
+  }
+  let users; try { users = (await api('GET', '/api/admin/users')).users; } catch (e) { fail(e); return go('#/'); }
+  const dt = t => t ? new Date(t * 1000).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
+  const by = {}; users.forEach(u => { const k = u.origin || 'не указано'; by[k] = (by[k] || 0) + 1; });
+  app.innerHTML = bar + `<main class="home"><div class="home-head"><div><h1>Кто пользуется</h1>
+    <p>${users.length} ${plural(users.length, 'человек', 'человека', 'человек')} · ${users.reduce((s, u) => s + u.projects.length, 0)} походов. Новые — сверху.</p></div></div>
+    <div class="chips" style="margin-bottom:16px">${Object.entries(by).sort((a, b) => b[1] - a[1]).map(([k, n]) => `<span class="gsum" style="--g:var(--navy)"><b>${n}</b> ${esc(k)}</span>`).join('')}</div>
+    <div class="tblwrap"><table class="sum adm"><thead><tr><th>Кто</th><th>Откуда</th><th>Пришёл</th><th>Заходил</th><th>Походы</th></tr></thead><tbody>
+    ${users.map(u => `<tr><td><b>${esc(u.name)}</b>${u.by === 'телефон' ? ' <span class="tag">телефон</span>' : ''}</td><td>${u.origin ? esc(u.origin) : '<span class="hint">не указано</span>'}</td><td class="n">${dt(u.created)}</td><td class="n">${dt(u.seen)}</td>
+      <td>${u.projects.length ? u.projects.map(p => `<div>«${esc(p.title)}»${p.ndays ? ` — ${p.ndays} дн., ${km(p.km)} км` : ' — <span class="hint">без трека</span>'}${p.built ? ` <span class="tag ok">${p.built} ${plural(p.built, 'лист', 'листа', 'листов')}</span>` : ''}</div>`).join('') : '<span class="hint">пока нет</span>'}</td></tr>`).join('')}
+    </tbody></table></div></main>`;
 }
 async function boot() {
   try {
@@ -186,7 +211,7 @@ function thumbSvg(c) {
 function renderHome() {
   document.title = 'Нитка — мои походы';
   const P = S.projects;
-  app.innerHTML = topBar(`<span class="sp"></span><span class="who">${esc(S.user.name)}</span><button class="btn ghost sm" data-a="logout">Выйти</button>`) + `
+  app.innerHTML = topBar(`<span class="sp"></span>${S.user.admin ? '<button class="btn ghost sm" data-a="admin">Кто пользуется</button>' : ''}<span class="who">${esc(S.user.name)}</span><button class="btn ghost sm" data-a="logout">Выйти</button>`) + `
   <main class="home">
     <div class="home-head"><div><h1>${P.length ? 'Мои походы' : `Привет, ${esc(S.user.name)}!`}</h1>
       <p>${P.length ? 'Сами карты хранятся ' + S.cfg.keep_days + ' дней, а поход со всеми настройками — всегда: пересоберёшь в один клик.' : 'Здесь будут твои походы. Начни с первого — понадобится трек: GPX, KML или ссылка nakarte.me.'}</p></div></div>
@@ -350,7 +375,7 @@ function stepTracks() {
     ${i ? `<div class="banner ok"><div><b>Нашёл:</b> ${esc(infoText(i))}.</div><div class="hint">${i.assigned === i.pieces - i.skipped ? 'Все треки разложились по дням сами.' : (i.unassigned ? `По дням не разложились: ${i.unassigned}. Это правится на шаге «Дни».` : '')}${i.skipped ? ` Дубли (${i.skipped}) отложены в сторону.` : ''}</div></div>` : ''}
     <label class="drop" id="drop">${I.upload}<b>Перетащи файлы сюда</b><span>GPX, KML, KMZ, GeoJSON или ZIP с ними — или нажми, чтобы выбрать</span><input id="file" type="file" multiple hidden accept=".gpx,.kml,.kmz,.geojson,.json,.zip,.nktk"></label>
     <form class="linkrow" id="linkf"><input type="url" name="link" placeholder="…или вставь ссылку nakarte.me с треком" autocomplete="off"><button class="btn">Добавить</button></form>
-    <details class="help"><summary>Как назвать треки и точки, чтобы всё разложилось само</summary><div class="in">
+    <details class="help" open><summary>Как назвать треки и точки, чтобы всё разложилось само</summary><div class="in">
       <div><b>Треки по дням.</b> В названии — дата или номер дня: <code>5 августа</code>, <code>05.08</code>, <code>День 3</code>, <code>3 день</code>. Радиальный выход — слово «радиально»: <code>9 августа радиально</code>.</div>
       <div><b>GPX с часов или навигатора</b> с отметками времени сам делится по суткам. Один нарисованный трек без дат можно разрезать по ночёвкам.</div>
       <div><b>Ночёвки</b> — точки с датой: <code>05.08</code>, <code>16-17.08</code> (днёвка). <b>Перевалы и вершины</b>: <code>пер. Долра 2А, 3500</code>, <code>гора Тетнульди 2Б, 4858 м</code>.</div>
@@ -868,6 +893,7 @@ const pieceById = id => P().pieces.find(p => p.id === id);
 const pointById = id => P().points.find(p => p.id === id);
 const A = {
   home() { go('#/'); },
+  admin() { go('#/admin'); },
   async logout() { await flush(); try { await api('POST', '/api/logout'); } catch (e) { /* ок */ } S.user = null; S.proj = null; S.pid = null; go('#/'); render(); },
   new: newProject,
   open(el) { go(`#/p/${el.dataset.id}/tracks`); },
