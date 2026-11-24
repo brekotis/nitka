@@ -40,3 +40,7 @@ NITKA_DATA=/var/lib/nitka NITKA_PORT=8080 .venv/bin/python -m server.app
 - Топоосновы — тайлы [nakarte.me](https://nakarte.me) (Генштаб) и [OpenTopoMap](https://opentopomap.org); высоты — тайлы Terrarium (AWS Open Data). Тайлы кэшируются на диске.
 - Каталог перевалов — база «Вестры» в том виде, в каком её отдаёт nakarte.me.
 - Шрифты карт — DejaVu Sans; интерфейса — Onest и Sofia Sans Condensed (OFL). Карта в редакторе — Leaflet.
+
+## Лицензия
+
+Код — MIT (см. `LICENSE`). У сторонних частей свои лицензии: Leaflet — BSD-2-Clause; шрифты DejaVu — Bitstream Vera / public domain; Onest и Sofia Sans Condensed — SIL OFL. Логотип турклуба «Восхождение» в `web/img/` под лицензию не подпадает.
