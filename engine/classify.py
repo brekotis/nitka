@@ -103,6 +103,26 @@ def is_summary_name(name): return bool(re.search(r'вес[ьъ]\s+маршрут
 # ---------------------------------------------------------------- названия точек
 _GRADE = re.compile(r'(?<![А-Яа-яёA-Za-z0-9])(н\s?/\s?к|[1-3]\s?[АБAB]\*?)(?![А-Яа-яёA-Za-z0-9])', re.I)
 _DATE = re.compile(r'(?<!\d)(\d{1,2})(?:\s*[-–—]\s*(\d{1,2}))?\.(\d{1,2})(?:\.(\d{4}|\d{2}))?(?!\d)\.?')
+_DATE2 = re.compile(r'(?<!\d)(\d{1,2})\.(\d{1,2})(?:\.(\d{4}|\d{2}))?\s*[-–—]\s*(\d{1,2})\.(\d{1,2})(?:\.(\d{4}|\d{2}))?(?!\d)\.?')
+
+def camp_date(raw, year=None):
+    """Дата ночёвки из названия → (первая ночь, сколько ночей, остаток названия, дата стояла в начале) | None."""
+    y0 = year or datetime.now().year
+    try:
+        m = _DATE2.search(raw)                    # «31.07 - 01.08»
+        if m and 1 <= int(m[2]) <= 12 and 1 <= int(m[5]) <= 12:
+            y1 = _year(m[6] or m[3], y0); d0 = date(_year(m[3], y1), int(m[2]), int(m[1])); d1 = date(y1, int(m[5]), int(m[4]))
+            if d1 < d0 and not m[3]: d0 = d0.replace(year=d0.year - 1)
+            if 0 <= (d1 - d0).days <= 15: return d0, (d1 - d0).days + 1, _DATE2.sub('', raw, count=1), m.start() == 0
+        m = _DATE.search(raw)                     # «05.08», «16-17.08», «17.07.26»
+        if m and 1 <= int(m[3]) <= 12 and 1 <= int(m[1]) <= 31:
+            y = _year(m[4], y0); d0 = date(y, int(m[3]), int(m[1])); nights = 1
+            if m[2]: nights = max(1, (date(y, int(m[3]), int(m[2])) - d0).days + 1)
+            return d0, nights, _DATE.sub('', raw, count=1), m.start() == 0
+    except ValueError:
+        pass
+    return None
+
 _H = re.compile(r'(?<![\d.,])(\d{3,4})(?:\s*м\b\.?)?(?![\d])')
 
 KEYWORDS = [  # порядок важен: первое совпадение
@@ -153,27 +173,21 @@ def classify_point(name, folder='', sym='', year=None):
     if not raw or re.fullmatch(r'[\d\s]*', raw) or re.fullmatch(r'(wpt|точка|point|метка)?\s*\d*', low):
         return out
 
-    # ночёвки: дата в названии
+    # ночёвки: дата в названии («05.08», «16-17.08», «Лагерь 31.07 - 01.08», «Ночёвка 3»)
     dm = _DATE.search(raw)
     camp_word = re.search(r'ноч[её]в|^ноч\s?\d|\bм\.\s?н\.|^\s*н\s?\d', low)
-    if dm and 1 <= int(dm[3]) <= 12 and 1 <= int(dm[1]) <= 31 and (f_camp or camp_word or not _DATE.sub('', raw).strip(' ,.;:-–')
-                                                                           or (dm.start() == 0 and not any(re.search(pat, _DATE.sub('', raw, count=1).lower()) for t, pat in KEYWORDS if t != 'campsite')
-                                                                               and not re.match(r'\s*(пер\.|перевал|гора|г\.|в\.|вершина|пик)', _DATE.sub('', raw, count=1).lower()))):
-        y = _year(dm[4], year or datetime.now().year)
-        try:
-            d0 = date(y, int(dm[3]), int(dm[1]))
-            nights = 1
-            if dm[2]:
-                d1 = date(y, int(dm[3]), int(dm[2]))
-                if d1 < d0: d1 = date(y + (1 if int(dm[3]) == 12 else 0), int(dm[3]) % 12 + 1, int(dm[2])) if False else d1
-                nights = max(1, (d1 - d0).days + 1)
-            rest = _DATE.sub('', raw, count=1)
-            rest = re.sub(r'(?i)ноч[её]вка|м\.\s?н\.', '', rest).strip(' ,.;:-–')
+    camp_kw = re.search(r'лагер|стоянк|бив[уа]+к|\bcamp', low)
+    cd = camp_date(raw, year)
+    if cd:
+        d0, nights, rest, at_start = cd
+        rl = rest.lower(); plain = not rest.strip(' ,.;:-–')
+        other = any(re.search(pat, rl) for t, pat in KEYWORDS if t != 'campsite') or re.match(r'\s*(пер\.|перевал|гора|г\.|в\.|вершина|пик)', rl)
+        pos = (_DATE2.search(raw) or _DATE.search(raw)).start(); glued = pos > 0 and raw[pos - 1].isalpha()      # «СТОЯНКА1.1» — не дата
+        if f_camp or camp_word or (camp_kw and not glued) or plain or (at_start and not other):
+            rest = re.sub(r'(?i)ноч[её]вка|м\.\s?н\.|лагерь|стоянка|бив[уа]+к', '', rest).strip(' ,.;:-–')
             hm = _H.search(rest)
             out.update(type='camp', date=d0.isoformat(), nights=nights, name=_H.sub('', rest).strip(' ,.;:-–м') if hm else rest, h=int(hm[1]) if hm and 100 <= int(hm[1]) <= 8900 else None)
             return out
-        except ValueError:
-            pass
     if camp_word:
         n = re.search(r'(\d{1,2})', low)
         out.update(type='camp', after_day=int(n[1]) if n else None, name='')

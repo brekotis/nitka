@@ -106,6 +106,7 @@ def camps(proj):
         if D['main']: return tuple(D['main'][0][0][:2]), tuple(D['main'][-1][-1][:2])
         return tuple(D['rad'][0][0][:2]), tuple(D['rad'][0][0][:2])       # только радиалка: вышли и вернулись
     have = [q for q in proj.get('points', []) if q.get('type') == 'camp']
+    sites = [(q['lat'], q['lon']) for q in proj.get('points', []) if q.get('type') in ('camp', 'campsite')]      # уже отмеченные стоянки любого вида
     out = []
     for d, nxt in zip(ds, ds[1:]):
         _, e = ends(d); s2, _ = ends(nxt)
@@ -114,6 +115,7 @@ def camps(proj):
         dt = (start + timedelta(days=d - 1)).isoformat() if start else None
         if any(dist((q['lat'], q['lon']), pt) < 400 and (not dt or not q.get('date') or q['date'] == dt) for q in have): continue
         if dt and any(q.get('date') == dt for q in have): continue
+        if any(dist(sp, pt) < 400 for sp in sites): continue
         note = f'конец дня {d}' + (f' и начало дня {nxt}' if gap <= 300 else f'; день {nxt} начинается в {gap / 1000:.1f} км отсюда — возможно, был переезд'.replace('.', ','))
         out.append(dict(lat=round(pt[0], 6), lon=round(pt[1], 6), date=dt, after_day=d, nights=nxt - d, note=note))
     return out

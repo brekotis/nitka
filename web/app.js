@@ -474,10 +474,36 @@ function todos() {
   if (showObst() && !objs.length) out.push({ step: 'points', tab: 'obst', run: 'passes', text: 'Перевалы и вершины не отмечены — найду их по каталогу, с категориями и высотами', btn: 'Найти перевалы' });
   const ng = objs.filter(q => q.type === 'pass' && !q.grade && q.on_map !== false).length;
   if (ng) out.push({ step: 'points', tab: 'obst', text: `У ${ng} ${plural(ng, 'перевала', 'перевалов', 'перевалов')} не указана категория`, btn: 'Проставить' });
+  const cs = pts.filter(q => q.type === 'campsite' && campDate(q));
+  if (cs.length) out.unshift({ step: 'points', tab: 'points', fix: 'camps', text: `${cs.length} ${plural(cs.length, 'точка', 'точки', 'точек')} вида «${cs[0].raw || cs[0].name}» — это ночёвки с датами, а записаны как места под стоянку`, btn: 'Сделать ночёвками' });
   const g = pts.filter(q => q.guess && q.type !== 'skip').length;
   if (g) out.push({ step: 'points', tab: 'points', filter: 'guess', text: `${g} ${plural(g, 'точка', 'точки', 'точек')}: тип угадан неуверенно`, btn: 'Проверить' });
   out.forEach((t, i) => { t.i = i; });
   return out;
+}
+// Дата ночёвки из названия точки: «22.07», «26-27.07», «31.07 - 01.08» (без lookbehind — он не работает в старом Safari)
+function campDate(q) {
+  const s = ' ' + (q.raw || q.name || ''); const y = (P().meta.start_date || '').slice(0, 4) || new Date().getFullYear();
+  const iso = (d, m) => `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`; const ok = (d, m) => +m >= 1 && +m <= 12 && +d >= 1 && +d <= 31;
+  let m = s.match(/[^\d.](\d{1,2})\.(\d{1,2})\s*[-–—]\s*(\d{1,2})\.(\d{1,2})(?!\d)/);
+  if (m && ok(m[1], m[2]) && ok(m[3], m[4])) { const n = Math.round((new Date(iso(m[3], m[4])) - new Date(iso(m[1], m[2]))) / 864e5) + 1; if (n >= 1 && n <= 15) return { date: iso(m[1], m[2]), nights: n }; }
+  m = s.match(/[^\d.а-яёa-z](\d{1,2})(?:\s*[-–—]\s*(\d{1,2}))?\.(\d{1,2})(?!\d)/i);
+  if (m && ok(m[1], m[3])) return { date: iso(m[1], m[3]), nights: m[2] ? Math.max(1, m[2] - m[1] + 1) : 1 };
+  return null;
+}
+// «Лагерь 22.07» записан как место под стоянку → делаем ночёвкой; подсказанные рядом ночёвки-дубли убираем
+function fixCamps() {
+  const pts = P().points; const made = [];
+  for (const q of pts) {
+    if (q.type !== 'campsite') continue; const d = campDate(q); if (!d) continue;
+    q.type = 'camp'; q.date = d.date; q.nights = d.nights; q.on_profile = true; delete q.guess;
+    q.name = (q.raw || q.name || '').replace(/\d{1,2}\.\d{1,2}\s*[-–—]\s*\d{1,2}\.\d{1,2}|\d{1,2}(\s*[-–—]\s*\d{1,2})?\.\d{1,2}(\.\d{2,4})?/, '').replace(/лагерь|стоянка|бивак|бивуак/i, '').replace(/^[\s,.;:–-]+|[\s,.;:–-]+$/g, '');
+    made.push(q);
+  }
+  const dup = q => q.type === 'camp' && q.folder === 'подсказка: концы дней' && made.some(c => c.date === q.date || L.latLng(c.lat, c.lon).distanceTo([q.lat, q.lon]) < 500);
+  const before = pts.length; P().points = pts.filter(q => !dup(q)); const gone = before - P().points.length;
+  S.selPoint = null; dirty(); paintPanel(true); drawPoints();
+  toast(`Ночёвок с датами: ${made.length}` + (gone ? `. Убрано дублей: ${gone}` : ''));
 }
 function todoBlock(list, title) {
   if (!list.length) return '';
@@ -871,6 +897,7 @@ const A = {
   okey(el) { const q = pointById(el.dataset.id); q.key = !q.key; dirty(); paintPanel(); },
   todo(el) {
     const t = todos()[+el.dataset.i]; if (!t) return;
+    if (t.fix === 'camps') return fixCamps();
     const jump = S.step !== t.step; S.selPoint = null; S.selBand = null;
     if (t.tab) S.ptab = t.tab; if (t.filter) S.filter = t.filter;
     if (jump) go(`#/p/${S.pid}/${t.step}`); else { paintPanel(true); drawPoints(); }
