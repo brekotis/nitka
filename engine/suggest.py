@@ -86,6 +86,38 @@ def osm_peaks(la0, la1, lo0, lo1):
         return out
     return []
 
+CAMP_KIND = {'camp_site': 'стоянка', 'alpine_hut': 'приют', 'wilderness_hut': 'хижина', 'shelter': 'укрытие'}
+
+def osm_camps(la0, la1, lo0, lo1):
+    """Стоянки из OpenStreetMap — кемпинги, приюты, хижины, укрытия: [(lat, lon, name, kind)].
+    Охват округляется до сетки 0,1° — соседние запросы берут тот же кэш (30 дней); нет связи — пусто."""
+    f = lambda v, up: (math.ceil(v * 10) if up else math.floor(v * 10)) / 10
+    la0, la1, lo0, lo1 = f(la0, 0), f(la1, 1), f(lo0, 0), f(lo1, 1)
+    if (la1 - la0) * (lo1 - lo0) > 4: return []
+    key = f'{la0:.1f}_{la1:.1f}_{lo0:.1f}_{lo1:.1f}'
+    path = os.path.join(mapkit.CACHE, 'osm_camps', key + '.json')
+    try:
+        if time.time() - os.path.getmtime(path) < 30 * 86400:
+            with open(path, encoding='utf-8') as fh: return json.load(fh)
+    except OSError: pass
+    bb = f'({la0:.4f},{lo0:.4f},{la1:.4f},{lo1:.4f})'
+    q = (f'[out:json][timeout:40];(nwr["tourism"~"^(camp_site|alpine_hut|wilderness_hut)$"]{bb};nwr["amenity"="shelter"]{bb};);out center;')
+    for url in OVERPASS:
+        try:
+            req = urllib.request.Request(url, data=urllib.parse.urlencode(dict(data=q)).encode(), headers={'User-Agent': mapkit.UA})
+            with urllib.request.urlopen(req, timeout=50) as r: d = json.loads(r.read().decode('utf-8'))
+        except Exception: continue
+        out = []
+        for e in d.get('elements', []):
+            t = e.get('tags', {}); c = e if 'lat' in e else e.get('center') or {}
+            if 'lat' not in c: continue
+            kind = CAMP_KIND.get(t.get('tourism')) or ('укрытие' if t.get('amenity') == 'shelter' else 'стоянка')
+            out.append((round(c['lat'], 6), round(c['lon'], 6), t.get('name:ru') or t.get('name') or '', kind))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as fh: json.dump(out, fh, ensure_ascii=False)
+        return out
+    return []
+
 def passes(proj, radius=400.0, sure=150.0):
     """Перевалы и вершины каталога у нитки: [{type, name, grade, h, lat, lon, day, dist, sure, note}] по ходу маршрута."""
     chains = day_chains(proj)

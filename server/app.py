@@ -479,7 +479,9 @@ GEO_CACHE, GEO_LOCK, GEO_LAST = {}, threading.Lock(), [0.0]
 GEN_JOBS, GEN_LOCK = {}, threading.Lock()      # подбор маршрута идёт в фоне: тропы и рельеф считаются десятки секунд
 
 def gen_run(jid, args):
-    try: res = routegen.propose(**args)
+    def progress(**kw):
+        with GEN_LOCK: GEN_JOBS[jid].setdefault('prog', {}).update(kw)
+    try: res = routegen.propose(progress=progress, **args)
     except Exception as e:
         import traceback; traceback.print_exc(); res = dict(ok=False, msg='Подбор сломался — попробуй другие условия.')
     with GEN_LOCK: GEN_JOBS[jid].update(state='done', result=res, finished=time.time())
@@ -743,6 +745,12 @@ class H(BaseHTTPRequestHandler):
             if len(GEO_CACHE) > 2000: GEO_CACHE.clear()
             GEO_CACHE[text.lower()] = items
             return self.send(200, dict(items=items))
+        if a == ['camps'] and m == 'GET':      # стоянки, приюты, хижины из OpenStreetMap — на карте планировщика
+            self.need_user()
+            try: la0, lo0, la1, lo1 = [float(x) for x in q['bbox'].split(',')]
+            except (KeyError, ValueError): raise Err(400, 'Нужен охват карты.')
+            if (la1 - la0) * (lo1 - lo0) > 1.5: return self.send(200, dict(items=[], wide=True))
+            return self.send(200, dict(items=suggest.osm_camps(la0, la1, lo0, lo1)), cache='private, max-age=3600')
         if a == ['elev'] and m == 'POST':      # высоты по рельефу — профиль в планировщике
             self.need_user()
             try: pts = [[float(x[0]), float(x[1])] for x in (self.json().get('pts') or [])][:8000]
@@ -890,9 +898,10 @@ class H(BaseHTTPRequestHandler):
                 d = self.json()
                 try:
                     st, fi = [float(x) for x in d['start']], [float(x) for x in d['finish']]
-                    args = dict(start=tuple(st), finish=tuple(fi), km=max(3.0, min(400.0, float(d['km']))), gmin=str(d.get('gmin') or '1А'), gmax=str(d.get('gmax') or '1Б'),
-                                nmin=int(d.get('nmin') or 1), nmax=int(d.get('nmax') or 3), days=int(d['days']) if d.get('days') else None, trail=d.get('trail', True) is not False,
-                                kind=proj['meta'].get('kind') or '', exclude=[str(x) for x in (d.get('exclude') or [])][:300])
+                    quota = {str(g): (int(v[0]), int(v[1])) for g, v in (d.get('quota') or {}).items()}
+                    args = dict(start=tuple(st), finish=tuple(fi), km=max(3.0, min(400.0, float(d['km']))), quota=quota or None,
+                                days=int(d['days']) if d.get('days') else None, trail=d.get('trail', True) is not False, kind=proj['meta'].get('kind') or '',
+                                exclude=[str(x) for x in (d.get('exclude') or [])][:300], must=[str(x) for x in (d.get('must') or [])][:6])
                 except (KeyError, TypeError, ValueError): raise Err(400, 'Укажи старт, финиш и длину.')
                 if args['days'] is not None and not 1 <= args['days'] <= 40: args['days'] = None
                 with GEN_LOCK:
@@ -905,7 +914,8 @@ class H(BaseHTTPRequestHandler):
             if sub == 'route-gen' and m == 'GET':
                 j = GEN_JOBS.get(q.get('job') or '')
                 if not j or j['pid'] != pid: raise Err(404, 'Подбор не найден — запусти ещё раз.')
-                return self.send(200, dict(state=j['state'], secs=int(time.time() - j['started']), **(j.get('result') or {})))
+                with GEN_LOCK: prog = dict(j.get('prog') or {})
+                return self.send(200, dict(state=j['state'], secs=int(time.time() - j['started']), prog=prog, **(j.get('result') or {})))
             if sub == 'plan' and m == 'POST':      # маршрут из планировщика → куски по дням, ночёвки, перевалы
                 r = planner.apply(proj, self.json().get('plan') or {})
                 if r['ok']: self.save(pid, proj, why='маршрут из планировщика')

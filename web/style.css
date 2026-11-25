@@ -778,3 +778,26 @@ svg.plprof .phx { stroke: #133C6A; stroke-width: 1; vector-effect: non-scaling-s
 .gp { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px 2px 2px; border-radius: 999px; background: #F1F4F8; font-size: 12.5px; color: var(--navy); }
 .gp b { background: var(--g); color: #fff; border-radius: 999px; padding: 1px 6px; font: 800 11px var(--head); }
 .gp i { font-style: normal; color: var(--muted); }
+
+/* ---- подбор: квоты по категориям, выбранные перевалы, ход работы */
+.gq { display: grid; gap: 3px; max-width: 260px; }
+.gqh, .gqr { display: grid; grid-template-columns: 52px 1fr 1fr; gap: 6px; align-items: center; }
+.gqh span { font: 700 11px var(--head); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); text-align: center; }
+.gqr input { width: 100%; padding: 4px 6px; border: 2px solid var(--sky-l); border-radius: 8px; font: 600 14px var(--body); text-align: center; }
+.gqr.off .gqb { opacity: .45; } .gqr.off input { color: var(--muted); }
+.gqb { background: var(--g); color: #fff; border-radius: 999px; text-align: center; font: 800 12.5px var(--head); padding: 3px 0; }
+.linkbtn { border: 0; background: none; color: #1F6FD1; font: 600 13px var(--body); cursor: pointer; padding: 2px 0; justify-self: start; }
+.gpicks { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-bottom: 4px; } .gpicks i { font-style: normal; font-size: 12.5px; color: var(--muted); margin-right: 2px; }
+.gpick { display: inline-flex; align-items: center; gap: 5px; padding: 2px 2px 2px 2px; border-radius: 999px; font-size: 12.5px; color: var(--navy); background: #E4F6EA; border: 1.5px solid #0B8A3E; }
+.gpick.ban { background: #F1F4F8; border-color: #9aa6b4; text-decoration: line-through; }
+.gpick b { background: var(--g); color: #fff; border-radius: 999px; padding: 1px 6px; font: 800 11px var(--head); }
+.gpick button { border: 0; background: none; cursor: pointer; font-size: 15px; color: var(--muted); padding: 0 5px; line-height: 1; }
+.catm.pass.must { box-shadow: 0 0 0 3px #0B8A3E, 0 1px 4px rgba(0, 0, 0, .35); transform: scale(1.15); }
+.catm.pass.ban { filter: grayscale(1); opacity: .55; }
+.catm.pass.ban::after { content: ''; position: absolute; left: -3px; right: -3px; top: 50%; height: 2.5px; background: #E2001A; transform: rotate(-35deg); }
+.catm.pass.dim { opacity: .35; }
+.gprog { display: grid; gap: 4px; margin: 6px 0; }
+.gpb { height: 8px; border-radius: 99px; background: var(--sky-l); overflow: hidden; } .gpb i { display: block; height: 100%; background: linear-gradient(90deg, var(--sun), #E2001A); transition: width .6s; }
+.gps_ { display: flex; justify-content: space-between; gap: 8px; font-size: 13.5px; color: var(--navy); }
+.campm { width: 14px; height: 14px; border-radius: 4px; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .3); display: grid; place-items: center; opacity: .85; }
+.campm svg { width: 12px; height: 12px; } .campm:hover { transform: scale(1.25); }
