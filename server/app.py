@@ -11,7 +11,7 @@ os.makedirs(DATA, exist_ok=True)
 os.environ.setdefault('NITKA_CACHE', os.path.join(DATA, 'cache'))
 sys.path.insert(0, ROOT)
 from engine import classify, importers, mapkit, model, suggest          # noqa: E402
-from engine import sheets as sheets_mod, chrono, trackfix, planner          # noqa: E402
+from engine import sheets as sheets_mod, chrono, trackfix, planner, terrain, routegen          # noqa: E402
 
 WEB = os.path.join(ROOT, 'web')
 RENDERS = os.path.join(DATA, 'renders')
@@ -476,6 +476,13 @@ class Err(Exception):
     def __init__(self, code, msg): self.code = code; self.msg = msg
 
 GEO_CACHE, GEO_LOCK, GEO_LAST = {}, threading.Lock(), [0.0]
+GEN_JOBS, GEN_LOCK = {}, threading.Lock()      # подбор маршрута идёт в фоне: тропы и рельеф считаются десятки секунд
+
+def gen_run(jid, args):
+    try: res = routegen.propose(**args)
+    except Exception as e:
+        import traceback; traceback.print_exc(); res = dict(ok=False, msg='Подбор сломался — попробуй другие условия.')
+    with GEN_LOCK: GEN_JOBS[jid].update(state='done', result=res, finished=time.time())
 
 class H(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
@@ -753,7 +760,7 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, dict(id=pid))
         if len(a) >= 2 and a[0] == 'projects':
             pid = a[1]; sub = a[2] if len(a) > 2 else ''
-            need = ('view' if m in ('GET', 'HEAD') and sub not in ('share', 'history', 'route') else 'owner' if sub == 'share' and m == 'POST'
+            need = ('view' if m in ('GET', 'HEAD') and sub not in ('share', 'history', 'route', 'route-gen') else 'owner' if sub == 'share' and m == 'POST'
                     else 'view' if (not sub and m == 'DELETE') or sub == 'copy' else 'edit')
             uid, proj, row = self.project(pid, need); role = self._role
             if not sub and m == 'GET':
@@ -879,6 +886,26 @@ class H(BaseHTTPRequestHandler):
                 proj['variants'] = [v for v in proj.get('variants', []) if v['id'] in used]
                 self.save(pid, proj, why=msg.lower() if len(msg) < 60 else 'варианты маршрута')
                 return self.send(200, dict(project=for_client(proj), msg=msg))
+            if sub == 'route-gen' and m == 'POST':      # подбор маршрута (эксперимент): старт, финиш, км, перевалы → варианты
+                d = self.json()
+                try:
+                    st, fi = [float(x) for x in d['start']], [float(x) for x in d['finish']]
+                    args = dict(start=tuple(st), finish=tuple(fi), km=max(3.0, min(400.0, float(d['km']))), gmin=str(d.get('gmin') or '1А'), gmax=str(d.get('gmax') or '1Б'),
+                                nmin=int(d.get('nmin') or 1), nmax=int(d.get('nmax') or 3), days=int(d['days']) if d.get('days') else None, trail=d.get('trail', True) is not False,
+                                kind=proj['meta'].get('kind') or '', exclude=[str(x) for x in (d.get('exclude') or [])][:300])
+                except (KeyError, TypeError, ValueError): raise Err(400, 'Укажи старт, финиш и длину.')
+                if args['days'] is not None and not 1 <= args['days'] <= 40: args['days'] = None
+                with GEN_LOCK:
+                    now = time.time()
+                    for k_ in [k_ for k_, j in GEN_JOBS.items() if now - j['started'] > 1800]: GEN_JOBS.pop(k_, None)
+                    if sum(1 for j in GEN_JOBS.values() if j['state'] == 'run') >= 3: raise Err(429, 'Сейчас уже подбираются маршруты у других — попробуй через минуту.')
+                    jid = secrets.token_hex(6); GEN_JOBS[jid] = dict(state='run', started=now, pid=pid)
+                threading.Thread(target=gen_run, args=(jid, args), daemon=True).start()
+                return self.send(200, dict(job=jid))
+            if sub == 'route-gen' and m == 'GET':
+                j = GEN_JOBS.get(q.get('job') or '')
+                if not j or j['pid'] != pid: raise Err(404, 'Подбор не найден — запусти ещё раз.')
+                return self.send(200, dict(state=j['state'], secs=int(time.time() - j['started']), **(j.get('result') or {})))
             if sub == 'plan' and m == 'POST':      # маршрут из планировщика → куски по дням, ночёвки, перевалы
                 r = planner.apply(proj, self.json().get('plan') or {})
                 if r['ok']: self.save(pid, proj, why='маршрут из планировщика')
@@ -905,6 +932,12 @@ class H(BaseHTTPRequestHandler):
                 try: a = [float(x) for x in q['a'].split(',')]; b = [float(x) for x in q['b'].split(',')]
                 except (KeyError, ValueError): raise Err(400, 'Нужны точки a и b.')
                 if dist_ok(a, b) > 30000: raise Err(400, 'Слишком далеко для одного отрезка — поставь промежуточные точки.')
+                if q.get('mode') == 'terrain':      # без тропы — самый удобный путь по рельефу, в обход скал и сбросов
+                    pts, info = terrain.path(a, b)
+                    return self.send(200, dict(ok=bool(pts), pts=pts or [], used='terrain', maxdeg=info and info['maxdeg'], msg='' if pts else 'Рельеф здесь не посчитался — соединю прямой.'))
+                if q.get('full') == '1':      # планировщик: тропа + подходы к ней по рельефу, без тропы — по рельефу
+                    pts, ok, used, deg = terrain.trail_leg(a, b, proj['meta'].get('kind') or '')
+                    return self.send(200, dict(ok=ok, pts=pts, used=used, maxdeg=deg, msg='' if ok else 'тропы нет — по рельефу'))
                 pts = trackfix.route(a, b, proj['meta'].get('kind') or '')
                 return self.send(200, dict(ok=bool(pts), pts=pts or [], msg='' if pts else 'Тропу не нашёл — соединю прямой.'))
             if sub == 'export.gpx' and m == 'GET':      # чистый GPX с прореживанием

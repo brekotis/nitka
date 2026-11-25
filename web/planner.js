@@ -22,11 +22,11 @@ export function createPlanner(ctx) {
     let pts = [], def = 'trail', fromDraft = false;
     if (pr.plan && pr.plan.pts) {
       pts = pr.plan.pts.map(p => ({ ...p })); def = (pts[0] && pts[0].mode) || 'trail';
-      (pr.plan.legs || []).forEach((g, i) => { const a = pts[i], b = pts[i + 1]; if (a && b && g.mode === 'trail' && g.pts && g.pts.length > 1) RC.set(lkey(a, b, 'trail'), { pts: g.pts, ok: g.ok !== false }); });
+      (pr.plan.legs || []).forEach((g, i) => { const a = pts[i], b = pts[i + 1]; if (a && b && g.mode !== 'line' && g.pts && g.pts.length > 1) RC.set(lkey(a, b, g.mode), { pts: g.pts, ok: g.ok !== false, used: g.mode }); });
     }
     let draft = null; try { draft = JSON.parse(localStorage[draftKey()] || 'null'); } catch (e) { draft = null; }
     if (draft && draft.pts && JSON.stringify(draft.pts) !== JSON.stringify(pts)) { pts = draft.pts; def = draft.def || def; fromDraft = true; (draft.rc || []).forEach(([k, v]) => RC.set(k, v)); }
-    P = { pts, def, undo: [], redo: [], sel: null, prof: null, profKey: '', layer: L.layerGroup().addTo(map), catLayer: L.layerGroup().addTo(map), hover: null,
+    P = { pts, def, undo: [], redo: [], sel: null, prof: null, profKey: '', layer: L.layerGroup().addTo(map), catLayer: L.layerGroup().addTo(map), genLayer: L.layerGroup().addTo(map), hover: null, tab: 'draw', gen: null,
       cat: new Map(), catBoxes: [], init: JSON.stringify(pr.plan ? pr.plan.pts : []), fromDraft };
     map.on('moveend', loadCat); document.addEventListener('keydown', onKey); document.addEventListener('click', onClick, true); document.addEventListener('change', onChange, true); document.addEventListener('submit', onSubmit, true);
     const fit = pts.length ? pts.map(ll) : pr.pieces.filter(p => p.role !== 'skip').flatMap(p => p.pts.map(q => [q[0], q[1]]));
@@ -37,7 +37,7 @@ export function createPlanner(ctx) {
   function close() {
     if (!P) return; const map = getMap();
     map && map.off('moveend', loadCat); document.removeEventListener('keydown', onKey); document.removeEventListener('click', onClick, true); document.removeEventListener('change', onChange, true); document.removeEventListener('submit', onSubmit, true);
-    P.layer.remove(); P.catLayer.remove(); P.hover && P.hover.remove(); P = null; ctx.onClose();
+    P.layer.remove(); P.catLayer.remove(); P.genLayer.remove(); P.hover && P.hover.remove(); P = null; ctx.onClose();
   }
   function cancel() {
     const changed = JSON.stringify(P.pts) !== P.init;
@@ -63,8 +63,8 @@ export function createPlanner(ctx) {
     const a = P.pts[i], b = P.pts[i + 1], mode = a.mode || P.def, line = [ll(a), ll(b)];
     if (mode === 'line') return { mode, pts: line, ok: true };
     const k = lkey(a, b, mode), c = RC.get(k);
-    if (c && c !== 'busy') return { mode, pts: withEnds(c.pts, a, b), ok: c.ok, msg: c.msg };
-    if (!c) fetchLeg(k, a, b);
+    if (c && c !== 'busy') return { mode, pts: withEnds(c.pts, a, b), ok: c.ok, msg: c.msg, used: c.used, deg: c.deg };
+    if (!c) fetchLeg(k, a, b, mode);
     return { mode, pts: line, ok: true, busy: true };
   }
   // тропа начинается не точно в точке маршрута: подход от точки к тропе и сход с неё — часть пути
@@ -74,16 +74,17 @@ export function createPlanner(ctx) {
     if (geo(out[out.length - 1], ll(b)) > 5) out.push(ll(b)); else out[out.length - 1] = ll(b);
     return out;
   }
-  function fetchLeg(k, a, b) { RC.set(k, 'busy'); queue.push([k, a, b]); pump(); }
+  function fetchLeg(k, a, b, mode) { RC.set(k, 'busy'); queue.push([k, a, b, mode]); pump(); }
   async function pump() {
     while (inflight < 3 && queue.length) {
-      const [k, a, b] = queue.shift(); inflight++;
+      const [k, a, b, mode] = queue.shift(); inflight++;
       (async () => {
         let v;
         try {
-          const r = await api('GET', `/api/projects/${ctx.pid()}/route?a=${a.lat},${a.lon}&b=${b.lat},${b.lon}`, undefined, false, false);
-          v = r.ok && r.pts.length > 1 ? { pts: r.pts, ok: true } : { pts: [ll(a), ll(b)], ok: false, msg: 'тропы нет — прямая' };
-        } catch (e) { v = { pts: [ll(a), ll(b)], ok: false, msg: /далеко/.test(e.message) ? 'далеко — поставь точку посередине' : 'тропу не нашёл — прямая' }; }
+          const r = await api('GET', `/api/projects/${ctx.pid()}/route?a=${a.lat},${a.lon}&b=${b.lat},${b.lon}&${mode === 'terrain' ? 'mode=terrain' : 'full=1'}`, undefined, false, false);
+          v = r.pts && r.pts.length > 1 ? { pts: r.pts, ok: mode === 'terrain' ? true : r.ok, used: r.used, deg: r.maxdeg, msg: r.ok ? '' : (mode === 'terrain' ? 'рельеф не посчитался — прямая' : 'тропы нет — по рельефу') }
+            : { pts: [ll(a), ll(b)], ok: false, msg: 'не нашёл пути — прямая' };
+        } catch (e) { v = { pts: [ll(a), ll(b)], ok: false, msg: /далеко/.test(e.message) ? 'далеко — поставь точку посередине' : 'не нашёл пути — прямая' }; }
         RC.set(k, v); inflight--;
         if (P) { render(); schedProfile(); keepDraft(); }
         pump();
@@ -101,6 +102,7 @@ export function createPlanner(ctx) {
     P.sel = at == null ? P.pts.length - 1 : at; changed();
   }
   function addCat(c) {      // перевал или вершина каталога — в самое подходящее место маршрута
+    if (P.tab === 'gen') return toast(`${c.title}${c.grade ? ' · ' + c.grade : ''}${c.h ? ' · ' + c.h + ' м' : ''} — чтобы провести маршрут через него, переключись на «Рисую сам»`);
     if (P.pts.some(p => p.ref && p.ref === c.id)) return toast(`${c.title} уже в маршруте`);
     const q = { lat: c.lat, lon: c.lon, kind: c.kind, name: c.title, h: c.h, grade: c.grade, ref: c.id };
     if (P.pts.length < 2) return addPoint(q);
@@ -146,6 +148,8 @@ export function createPlanner(ctx) {
       const M = marks.map(m => idx.indexOf(m));
       const seg = (a, b) => { let up = 0, dn = 0; for (let i = a + 1; i <= b; i++) { const d = E[i] - E[i - 1]; if (d > 0) up += d; else dn -= d; } return { km: (D[b] - D[a]) / 1000, up: Math.round(up), dn: Math.round(dn) }; };
       const legS = M.slice(0, -1).map((m, i) => seg(m, M[i + 1]));
+      const steep = (a, b) => { let best = 0, j = a; for (let i = a; i <= b; i++) { while (j < b && D[j] - D[i] < 60) j++; if (D[j] - D[i] < 60) break; best = Math.max(best, Math.atan(Math.abs(E[j] - E[i]) / (D[j] - D[i])) * 180 / Math.PI); } return Math.round(best); };
+      legS.forEach((s, i) => { s.deg = steep(M[i], M[i + 1]); });
       const cut = [0, ...P.pts.map((p, i) => i).filter(i => i > 0 && i < P.pts.length - 1 && P.pts[i].kind === 'camp'), P.pts.length - 1];
       const days = cut.slice(0, -1).map((a, i) => seg(M[a], M[cut[i + 1]]));
       P.prof = { D, E, R: pick, M, legS, days, all: seg(0, E.length - 1), stale: false }; P.profKey = key;
@@ -201,11 +205,11 @@ export function createPlanner(ctx) {
   }
   function drawCat() {
     if (!P) return; const map = getMap(), z = map.getZoom(), vb = map.getBounds().pad(0.1); P.catLayer.clearLayers();
-    if (z < 9) return;
+    if (z < 9 || P.tab === 'gen') return;      // в подборе каталог не мешает вариантам: видны только перевалы выбранного
     const used = new Set(P.pts.map(p => p.ref).filter(Boolean));
     let n = 0;
     for (const c of P.cat.values()) {
-      if (used.has(c.id) || !vb.contains([c.lat, c.lon])) continue;
+      if (used.has(c.id) || !vb.contains([c.lat, c.lon]) || (c.kind === 'peak' && z < 12)) continue;
       if (++n > 500) break;
       const col = (ctx.gcol()[c.grade] || '#7d8a99'), lab = z >= 13 ? `<span class="cl">${esc(c.name || c.title)}${c.h ? ' ' + c.h : ''}</span>` : '';
       const html = c.kind === 'peak' ? `<div class="catm peak"><i></i>${lab}</div>` : `<div class="catm pass" style="--g:${col}"><b>${esc(c.grade || '')}</b>${lab}</div>`;
@@ -215,14 +219,114 @@ export function createPlanner(ctx) {
     }
   }
 
+
+  // ---------------------------------------------------------------- подбор маршрута (эксперимент)
+  const GRADES = ['н/к', '1А', '1Б', '2А', '2Б', '3А', '3Б'];
+  const VCOL = ['#E2001A', '#1F6FD1', '#0B8A3E', '#7A1AAA', '#D96C00', '#00838F'];
+  function genInit() {
+    if (P.gen) return;
+    const f = P.pts[0], l = P.pts[P.pts.length - 1];
+    P.gen = { start: f ? ll(f) : null, finish: l && P.pts.length > 1 ? ll(l) : null, loop: false, km: 60, days: '', gmin: '1А', gmax: '1Б', nmin: 1, nmax: 3, trail: true,
+      pick: f ? (P.pts.length > 1 ? null : 'finish') : 'start', res: [], sel: 0, job: null, secs: 0, shown: [], msg: '' };
+  }
+  function genFlag(q, kind) {
+    const m = L.marker(q, { icon: L.divIcon({ className: 'plkw', html: `<div class="gflag ${kind}">${kind === 'start' ? 'С' : 'Ф'}</div>`, iconSize: [30, 30], iconAnchor: [15, 15] }), draggable: true, zIndexOffset: 800 }).addTo(P.genLayer);
+    m.bindTooltip(kind === 'start' ? 'Старт — тяни, чтобы передвинуть' : 'Финиш — тяни, чтобы передвинуть', { className: 'tt', direction: 'top', offset: [0, -14] });
+    m.on('dragend', ev => { const c = ev.target.getLatLng(); P.gen[kind] = [+c.lat.toFixed(6), +c.lng.toFixed(6)]; genRender(); ctx.repaint(); });
+  }
+  function genRender() {
+    if (!P || !P.genLayer) return; P.genLayer.clearLayers();
+    if (P.tab !== 'gen') return;
+    const G = P.gen;
+    G.res.forEach((v, i) => { if (i === G.sel) return; L.polyline(v.line, { color: VCOL[i % VCOL.length], weight: 3.5, opacity: .55, dashArray: '6 6' }).on('click', () => { G.sel = i; genRender(); ctx.repaint(); }).addTo(P.genLayer); });
+    const v = G.res[G.sel];
+    if (v) {
+      L.polyline(v.line, { color: '#fff', weight: 10, opacity: .9, interactive: false }).addTo(P.genLayer);
+      L.polyline(v.line, { color: VCOL[G.sel % VCOL.length], weight: 5.5, interactive: false }).addTo(P.genLayer);
+      v.plan.pts.forEach(p => { if (p.kind !== 'pass' && p.kind !== 'camp') return;
+        L.marker([p.lat, p.lon], { icon: L.divIcon({ className: 'plkw', html: `<div class="plk ${p.kind}">${sym(p.kind)}</div>`, iconSize: [22, 22], iconAnchor: [11, 11] }), interactive: true })
+          .bindTooltip(`${esc(p.name || (p.kind === 'camp' ? 'ночёвка' : ''))}${p.grade ? ' · ' + esc(p.grade) : ''}${p.h ? ' · ' + p.h + ' м' : ''}`, { className: 'tt', direction: 'top' }).addTo(P.genLayer); });
+    }
+    if (G.start) genFlag(G.start, 'start');
+    if (G.finish && !G.loop) genFlag(G.finish, 'finish');
+  }
+  function findHtml() {
+    return `<form class="plfind" data-plfind><input type="search" name="q" placeholder="Куда идём? Село, вершина, перевал…" autocomplete="off" value="${esc(P.findQ || '')}"><button class="btn sm">Найти</button></form>
+      ${P.found ? `<div class="plfound">${P.found.length ? P.found.map((f, i) => `<button data-pl="goto" data-i="${i}">${esc(f.name)}</button>`).join('') : '<div class="hint">Ничего не нашлось — попробуй иначе или найди на карте.</div>'}</div>` : ''}`;
+  }
+  function genPanel() {
+    const G = P.gen, run = !!G.job;
+    const gsel = (f, v) => `<select data-gf="${f}">${GRADES.map(g => `<option${g === v ? ' selected' : ''}>${g}</option>`).join('')}</select>`;
+    const where = q => q ? `${q[0].toFixed(4)}, ${q[1].toFixed(4)}` : 'не указан';
+    return `<div class="banner gexp"><div><b>Эксперимент.</b> «Нитка» складывает маршрут из перевалов каталога, троп OpenStreetMap и рельефа. Это идея для разговора, а не готовая нитка: каждый перевал проверь по отчётам — с какой стороны заход, есть ли тропа, открыт ли район.</div></div>
+      ${findHtml()}
+      <div class="gpts">
+        <div class="gpt${G.pick === 'start' ? ' pick' : ''}"><span class="gflag start">С</span><div><b>Старт</b><div class="hint">${G.start ? where(G.start) : 'нажми на карте'}</div></div><button class="btn sm" data-pl="gpick" data-v="start">${G.pick === 'start' ? 'Жду клик по карте…' : 'Указать на карте'}</button></div>
+        <label class="switch gloop"><input type="checkbox" data-gf="loop" ${G.loop ? 'checked' : ''}><span>Кольцо — финиш там же, где старт</span></label>
+        ${G.loop ? '' : `<div class="gpt${G.pick === 'finish' ? ' pick' : ''}"><span class="gflag finish">Ф</span><div><b>Финиш</b><div class="hint">${G.finish ? where(G.finish) : 'нажми на карте'}</div></div><button class="btn sm" data-pl="gpick" data-v="finish">${G.pick === 'finish' ? 'Жду клик по карте…' : 'Указать на карте'}</button></div>`}
+      </div>
+      <div class="ggrid">
+        <label class="field"><span>Длина, км</span><input type="number" min="5" max="400" step="5" data-gf="km" value="${G.km}"></label>
+        <label class="field"><span>Дней</span><input type="number" min="1" max="40" data-gf="days" value="${G.days}" placeholder="как выйдет"></label>
+        <div class="field"><span>Перевалы, категория</span><div class="grow">от ${gsel('gmin', G.gmin)} до ${gsel('gmax', G.gmax)}</div></div>
+        <div class="field"><span>Сколько перевалов</span><div class="grow">от <input type="number" min="1" max="6" data-gf="nmin" value="${G.nmin}"> до <input type="number" min="1" max="6" data-gf="nmax" value="${G.nmax}"></div></div>
+      </div>
+      <div class="field"><span>Как идти</span><div class="seg sm even"><button class="${G.trail ? 'on' : ''}" data-pl="gtrail" data-v="1">По тропам</button><button class="${G.trail ? '' : 'on'}" data-pl="gtrail" data-v="0">По рельефу, без троп</button></div>
+        <div class="hint">${G.trail ? 'Тропы OpenStreetMap; к перевалу, куда тропа не доходит, — подход по рельефу.' : 'Без троп: самый удобный путь по склонам, в обход круч.'}${G.days ? ' Ночёвки встанут у границ дней — в самой низкой точке рядом, то есть в долине.' : ''}</div></div>
+      <div class="plbar"><button class="btn go" data-pl="grun" ${run || !G.start || (!G.finish && !G.loop) ? 'disabled' : ''}>${run ? `Подбираю… ${G.secs} с` : 'Подобрать варианты'}</button></div>
+      ${run ? '<div class="hint">Ищу цепочки перевалов нужной длины, потом прокладываю каждую по тропам и считаю набор по рельефу — обычно 10–60 секунд.</div>' : ''}
+      ${G.msg ? `<div class="banner"><div>${esc(G.msg)}</div></div>` : ''}
+      ${G.res.length ? `<div class="gvars">${G.res.map((v, i) => `<div class="gvar${i === G.sel ? ' sel' : ''}" data-pl="gsel" data-i="${i}" style="--vc:${VCOL[i % VCOL.length]}">
+          <div class="gvh"><b>Вариант ${i + 1}</b><span class="gkm">${String(v.km).replace('.', ',')} км</span><span class="hint">${v.delta > 0 ? '+' : ''}${String(v.delta).replace('.', ',')} к задуманному</span><span>+${v.up} / −${v.dn} м</span></div>
+          <div class="gps">${v.passes.map(p => `<span class="gp" style="--g:${ctx.gcol()[p.grade] || '#7d8a99'}" title="${esc(p.note || '')}"><b>${esc(p.grade || '')}</b>${esc(p.name.replace(/^пер\.\s*/, ''))}${p.h ? ` <i>${p.h}</i>` : ''}</span>`).join('')}</div>
+          ${v.camps.length ? `<div class="hint">Ночёвки: ${v.camps.map(c => `${String(c.km).replace('.', ',')} км, ${c.h} м`).join(' · ')}</div>` : ''}
+          ${v.camps.some(c => c.h > 3300) ? `<div class="warnx">Ночёвка на ${Math.max(...v.camps.map(c => c.h))} м — высоко: дни выходят по гребням или ледникам. Поменяй число дней или передвинь ночёвку.</div>` : ''}
+          ${v.nolink ? `<div class="warnx">Без тропы ${v.nolink} из ${v.legs} отрезков — там путь по рельефу</div>` : ''}
+          ${i === G.sel ? '<div class="chips"><button class="btn sm go" data-pl="gtake">Взять в маршрут</button><span class="hint">дальше правится как обычно</span></div>' : ''}</div>`).join('')}</div>
+        <button class="btn sm" data-pl="gmore" ${run ? 'disabled' : ''}>Ещё варианты — с другими перевалами</button>` : ''}`;
+  }
+  async function genRun(more) {
+    const G = P.gen; if (G.job) return;
+    if (!more) { G.res = []; G.shown = []; G.sel = 0; }
+    G.msg = ''; G.secs = 0;
+    const body = { start: G.start, finish: G.loop ? G.start : G.finish, km: +G.km, days: G.days ? +G.days : null, gmin: G.gmin, gmax: G.gmax, nmin: +G.nmin, nmax: +G.nmax, trail: G.trail, exclude: G.shown };
+    try { G.job = (await api('POST', `/api/projects/${ctx.pid()}/route-gen`, body, false, false)).job; } catch (e) { G.msg = e.message; ctx.repaint(); return; }
+    ctx.repaint();
+    while (P && P.gen === G && G.job) {
+      await new Promise(r => setTimeout(r, 1500));
+      let r; try { r = await api('GET', `/api/projects/${ctx.pid()}/route-gen?job=${G.job}`, undefined, false, false); } catch (e) { G.job = null; G.msg = e.message; break; }
+      G.secs = r.secs;
+      if (r.state === 'done') {
+        G.job = null;
+        if (!r.ok) G.msg = r.msg;
+        else { const n0 = G.res.length; G.res.push(...r.variants); G.sel = n0; r.variants.forEach(v => v.passes.forEach(p => G.shown.push(p.ref)));
+          const b = L.latLngBounds(r.variants.flatMap(v => v.line)); getMap().fitBounds(b.pad(0.1)); }
+      }
+      if (P) { genRender(); ctx.repaint(); }
+    }
+  }
+  function genTake() {
+    const v = P.gen.res[P.gen.sel]; if (!v) return;
+    const go = () => {
+      snap();
+      P.pts = v.plan.pts.map(p => ({ ...p }));
+      v.plan.legs.forEach((g, i) => { const a = P.pts[i], b = P.pts[i + 1]; if (a && b && g.mode !== 'line') RC.set(lkey(a, b, g.mode), { pts: g.pts, ok: g.ok !== false, used: g.mode }); });
+      P.tab = 'draw'; P.sel = null; genRender(); changed();
+      toast('Вариант в маршруте — двигай точки, меняй отрезки и ночёвки, потом «Готово — в поход»');
+    };
+    if (P.pts.length > 1) return confirmBox('Заменить нарисованный маршрут?', 'Точки, которые сейчас в планировщике, заменятся выбранным вариантом. Передумаешь — Ctrl+Z.', 'Заменить', go);
+    go();
+  }
+
   // ---------------------------------------------------------------- карта
   function render() {
     if (!P) return; const map = getMap(); P.layer.clearLayers();
     P.pts.slice(0, -1).forEach((_, i) => {
       const g = legOf(i), line = g.pts.map(q => [q[0], q[1]]);
       L.polyline(line, { color: '#fff', weight: 10, opacity: .9, interactive: false }).addTo(P.layer);
-      const pl_ = L.polyline(line, { color: g.ok ? '#E2001A' : '#B4561A', weight: 5, dashArray: g.mode === 'line' || !g.ok ? '10 7' : null, opacity: g.busy ? .55 : 1 }).addTo(P.layer);
-      pl_.bindTooltip(`Отрезок ${i + 1}–${i + 2} · ${g.mode === 'line' ? 'напрямую' : g.ok ? 'по тропе' : (g.msg || 'тропы нет — прямая')}<br><small>нажми — вставить точку здесь</small>`, { sticky: true, className: 'tt' });
+      const off = g.mode === 'terrain' || g.used === 'terrain';
+      const pl_ = L.polyline(line, { color: g.ok || off ? '#E2001A' : '#B4561A', weight: 5, dashArray: g.mode === 'line' ? '10 7' : off ? '2 8' : null, lineCap: off ? 'round' : 'butt', opacity: g.busy ? .55 : 1 }).addTo(P.layer);
+      pl_.bindTooltip(`Отрезок ${i + 1}–${i + 2} · ${g.mode === 'line' ? 'напрямую' : g.mode === 'terrain' ? 'по рельефу, без тропы' : g.ok ? 'по тропе' : (g.msg || 'тропы нет — по рельефу')}<br><small>нажми — вставить точку здесь</small>`, { sticky: true, className: 'tt' });
       pl_.on('click', ev => { L.DomEvent.stop(ev); addPoint(ev.latlng, i + 1); });
     });
     const sz = touch() ? 30 : 24;
@@ -241,6 +345,12 @@ export function createPlanner(ctx) {
   }
   function click(latlng) {
     if (!P) return;
+    if (P.tab === 'gen') {
+      const G = P.gen, q = [+latlng.lat.toFixed(6), +latlng.lng.toFixed(6)];
+      const t = G.pick || (!G.start ? 'start' : !G.finish && !G.loop ? 'finish' : null);
+      if (!t) return toast('Старт и финиш стоят. Передвинуть — потяни флажок или нажми «Указать на карте»');
+      G[t] = q; G.pick = t === 'start' && !G.finish && !G.loop ? 'finish' : null; genRender(); ctx.repaint(); return;
+    }
     // рядом значок перевала — значит, хотели перевал
     const map = getMap(), cp = map.latLngToContainerPoint(latlng); let near = null;
     for (const c of P.cat.values()) { const p = map.latLngToContainerPoint([c.lat, c.lon]); const d = Math.hypot(p.x - cp.x, p.y - cp.y); if (d < 16 && (!near || d < near.d)) near = { c, d }; }
@@ -260,12 +370,14 @@ export function createPlanner(ctx) {
     const other = ctx.proj().pieces.some(p => p.src !== 'plan' && (p.role === 'main' || p.role === 'radial'));
     const st = i => pr && pr.legS && pr.legS[i] ? `${kmTxt(pr.legS[i].km * 1000)} км · +${pr.legS[i].up} −${pr.legS[i].dn}` : `${kmTxt(legs[i].pts.reduce((s, q, j, a) => j ? s + geo(a[j - 1], q) : 0, 0))} км`;
     const hAt = i => pr && pr.M ? Math.round(pr.E[pr.M[i]]) : null;
+    const degTxt = i => { const d = pr && pr.legS && pr.legS[i] ? pr.legS[i].deg : null; return d == null ? '' : `<span class="${d >= 30 ? 'warnx' : 'hint'}" title="Самый крутой участок отрезка (по модели рельефа, на 60 м)">круче всего ${d}°${d >= 35 && legs[i].mode === 'line' ? ' — попробуй «рельеф»' : ''}</span>`; };
     return `<div class="hhead"><h2>Маршрут</h2><span class="sp"></span><button class="icon" data-pl="undo" title="Отменить (Ctrl+Z)" ${P.undo.length ? '' : 'disabled'}>↶</button><button class="icon" data-pl="redo" title="Вернуть (Ctrl+Y)" ${P.redo.length ? '' : 'disabled'}>↷</button></div>
+      <div class="seg sm even gtabs"><button class="${P.tab === 'draw' ? 'on' : ''}" data-pl="tab" data-v="draw">Рисую сам</button><button class="${P.tab === 'gen' ? 'on' : ''}" data-pl="tab" data-v="gen">Подобрать <sup>β</sup></button></div>
+      ${P.tab === 'gen' ? genPanel() : `
       <div class="plbar"><button class="btn sm" data-pl="cancel">Отмена</button><button class="btn go" data-pl="done" ${n < 2 ? 'disabled' : ''}>Готово — в поход</button></div>
-      <div class="field"><span>Между точками</span><div class="seg sm even"><button class="${P.def === 'trail' ? 'on' : ''}" data-pl="def" data-v="trail">По тропам</button><button class="${P.def === 'line' ? 'on' : ''}" data-pl="def" data-v="line">Напрямую</button></div>
-        <div class="hint">${P.def === 'trail' ? 'Путь между точками прокладывается по тропам OpenStreetMap. Где тропы нет (ледник, перевал без тропы) — переключи отрезок на «прямо».' : 'Точки соединяются прямыми — для бездорожья. Любой отрезок можно отдельно пустить по тропе.'} Это — для новых точек; у каждого отрезка свой переключатель ниже.</div></div>
-      <form class="plfind" data-plfind><input type="search" name="q" placeholder="Куда идём? Село, вершина, перевал…" autocomplete="off" value="${esc(P.findQ || '')}"><button class="btn sm">Найти</button></form>
-      ${P.found ? `<div class="plfound">${P.found.length ? P.found.map((f, i) => `<button data-pl="goto" data-i="${i}">${esc(f.name)}</button>`).join('') : '<div class="hint">Ничего не нашлось — попробуй иначе или найди на карте.</div>'}</div>` : ''}
+      <div class="field"><span>Между точками</span><div class="seg sm even"><button class="${P.def === 'trail' ? 'on' : ''}" data-pl="def" data-v="trail">По тропам</button><button class="${P.def === 'terrain' ? 'on' : ''}" data-pl="def" data-v="terrain">По рельефу</button><button class="${P.def === 'line' ? 'on' : ''}" data-pl="def" data-v="line">Напрямую</button></div>
+        <div class="hint">${P.def === 'trail' ? 'По тропам OpenStreetMap; где тропа не доходит до точки (перевал, вершина) — подход по рельефу, в обход скал. Тропы нет вовсе — весь отрезок по рельефу.' : P.def === 'terrain' ? 'Без троп: самый удобный путь по склонам — долинами, в обход круч (круче 35° почти не ходит), на седловину.' : 'Прямыми — как по линейке. Набор на гребнях выйдет завышенным, круче всего — смотри у отрезка.'} Это — для новых точек; у каждого отрезка свой переключатель ниже.</div></div>
+      ${findHtml()}
       <div class="edstep plstep"><span>${step}</span></div>
       ${P.fromDraft ? '<div class="hint">Это черновик из браузера — в поход он попадёт по «Готово». <a href="#" data-pl="drop">Отбросить черновик</a></div>' : ''}
       ${other ? '<div class="banner"><div>В походе уже есть загруженный трек — нарисованный маршрут добавится к нему как основная нитка. Если это вариант, отметь его в «Днях».</div></div>' : ''}
@@ -277,9 +389,9 @@ export function createPlanner(ctx) {
           <select data-plf="kind" data-i="${i}" aria-label="Что это">${Object.entries(KIND).map(([k, t]) => `<option value="${k}"${p.kind === k ? ' selected' : ''}>${t}</option>`).join('')}</select>
           <span class="hint plh">${p.grade ? esc(p.grade) + ' · ' : ''}${p.h || hAt(i) ? (p.h || hAt(i)) + ' м' : ''}</span>
           <button class="icon-btn" data-pl="del" data-i="${i}" title="Убрать точку">×</button></div>
-        ${i < n - 1 ? `<div class="pll"><span class="seg sm"><button class="${legs[i].mode === 'trail' ? 'on' : ''}" data-pl="lmode" data-i="${i}" data-v="trail" title="По тропам OpenStreetMap">тропа</button><button class="${legs[i].mode === 'line' ? 'on' : ''}" data-pl="lmode" data-i="${i}" data-v="line" title="Прямой линией">прямо</button></span>
-          <span>${st(i)}</span>${legs[i].busy ? '<span class="hint">ищу тропу…</span>' : !legs[i].ok ? `<span class="warnx">${esc(legs[i].msg || 'тропы нет — прямая')}</span>` : ''}</div>` : ''}`).join('')}</div>
-      ${n ? '<div class="hint">Правый клик по точке на карте — убрать её. Ctrl+Z — отменить.</div>' : ''}`;
+        ${i < n - 1 ? `<div class="pll"><span class="seg sm"><button class="${legs[i].mode === 'trail' ? 'on' : ''}" data-pl="lmode" data-i="${i}" data-v="trail" title="По тропам; к точке вне тропы — подход по рельефу">тропа</button><button class="${legs[i].mode === 'terrain' ? 'on' : ''}" data-pl="lmode" data-i="${i}" data-v="terrain" title="Без тропы — по склонам, в обход круч">рельеф</button><button class="${legs[i].mode === 'line' ? 'on' : ''}" data-pl="lmode" data-i="${i}" data-v="line" title="Прямой линией">прямо</button></span>
+          <span>${st(i)}</span>${degTxt(i)}${legs[i].busy ? `<span class="hint">${legs[i].mode === 'terrain' ? 'считаю по рельефу…' : 'ищу тропу…'}</span>` : !legs[i].ok ? `<span class="warnx">${esc(legs[i].msg || 'тропы нет — по рельефу')}</span>` : ''}</div>` : ''}`).join('')}</div>
+      ${n ? '<div class="hint">Правый клик по точке на карте — убрать её. Ctrl+Z — отменить.</div>' : ''}`}`;
   }
   function onClick(e) {
     if (!P) return;
@@ -290,6 +402,12 @@ export function createPlanner(ctx) {
     else if (a === 'def') { P.def = b.dataset.v; ctx.repaint(); keepDraft(); }
     else if (a === 'lmode') { snap(); P.pts[i].mode = b.dataset.v; changed(); }
     else if (a === 'del') delPoint(i);
+    else if (a === 'tab') { P.tab = b.dataset.v; if (P.tab === 'gen') genInit(); P.layer.eachLayer(l => l.setStyle && l.setStyle({ opacity: P.tab === 'gen' ? .25 : 1 })); genRender(); drawCat(); ctx.repaint(); }
+    else if (a === 'gpick') { P.gen.pick = b.dataset.v; ctx.repaint(); toast(`Нажми на карте ${b.dataset.v === 'start' ? 'старт' : 'финиш'}`); }
+    else if (a === 'gtrail') { P.gen.trail = b.dataset.v === '1'; ctx.repaint(); }
+    else if (a === 'grun') genRun(false); else if (a === 'gmore') genRun(true);
+    else if (a === 'gsel') { if (e.target.closest('[data-pl="gtake"]')) return; P.gen.sel = i; genRender(); ctx.repaint(); }
+    else if (a === 'gtake') genTake();
     else if (a === 'goto') { const f = P.found[i], map = getMap(); P.found = null; if (f.bbox) map.fitBounds([[f.bbox[0], f.bbox[2]], [f.bbox[1], f.bbox[3]]], { maxZoom: 13 }); else map.setView([f.lat, f.lon], 12); ctx.repaint(); }
     else if (a === 'drop') { try { delete localStorage[draftKey()]; } catch (er) { /* ок */ } const pr = ctx.proj(); P.pts = pr.plan ? pr.plan.pts.map(p => ({ ...p })) : []; P.fromDraft = false; P.undo = []; changed(); }
   }
@@ -301,7 +419,10 @@ export function createPlanner(ctx) {
     ctx.repaint();
   }
   function onChange(e) {
-    if (!P) return; const el = e.target.closest('[data-plf]'); if (!el) return;
+    if (!P) return;
+    const gf = e.target.closest('[data-gf]');
+    if (gf && P.gen) { const f = gf.dataset.gf; P.gen[f] = f === 'loop' ? gf.checked : gf.value; if (f === 'loop') { P.gen.pick = null; genRender(); } ctx.repaint(); return; }
+    const el = e.target.closest('[data-plf]'); if (!el) return;
     const i = +el.dataset.i, p = P.pts[i]; if (!p) return;
     snap();
     if (el.dataset.plf === 'name') { p.name = el.value.trim().slice(0, 80); keepDraft(); render(); }

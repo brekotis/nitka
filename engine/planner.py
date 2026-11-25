@@ -34,7 +34,7 @@ def clean(plan):
         except (TypeError, ValueError): h = None
         K.append(dict(lat=round(lat, 6), lon=round(lon, 6), kind=kind, name=str(p.get('name') or '')[:80], h=h,
                       grade=str(p.get('grade') or '')[:6] or None, ref=str(p.get('ref') or '')[:40] or None,
-                      mode='line' if p.get('mode') == 'line' else 'trail'))
+                      mode=p.get('mode') if p.get('mode') in ('line', 'terrain') else 'trail'))
     legs = []
     for i, g in enumerate((plan.get('legs') or [])[:max(0, len(K) - 1)]):
         try: pts = [[round(float(q[0]), 6), round(float(q[1]), 6)] for q in (g.get('pts') or [])][:MAX_LEG]
@@ -64,7 +64,7 @@ def apply(proj, plan):
     if len(K) < 2: return dict(ok=False, msg='Нужно хотя бы две точки маршрута.')
     days = []; cur = [[K[0]['lat'], K[0]['lon']]]; first = 0
     for i, g in enumerate(legs):
-        pts = densify(g['pts']) if g['mode'] == 'line' else g['pts']
+        pts = densify(g['pts']) if g['mode'] != 'trail' else g['pts']
         cur.extend(pts[1:])
         last = i + 1 == len(K) - 1
         if K[i + 1]['kind'] == 'camp' or last:
