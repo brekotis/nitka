@@ -126,7 +126,7 @@ async function renderAdmin() {
 async function boot() {
   try {
     const [me, ty] = await Promise.all([api('GET', '/api/me', undefined, false, false), api('GET', '/api/types', undefined, false, false)]);
-    S.user = me.user; S.cfg = me; S.types = ty.types; S.grades = ty.grades; S.obj = ty.obj; S.bands = ty.bands || []; S.gcol = ty.grade_col || {};
+    S.user = me.user; S.cfg = me; S.news = me.news || []; S.types = ty.types; S.grades = ty.grades; S.obj = ty.obj; S.bands = ty.bands || []; S.gcol = ty.grade_col || {};
   } catch (e) { fail(e); }
   route();
 }
@@ -267,7 +267,7 @@ function thumbSvg(c) {
 function renderHome() {
   document.title = 'Нитка — мои походы';
   const P = S.projects;
-  app.innerHTML = topBar(`<span class="sp"></span>${S.user.admin ? '<button class="btn ghost sm" data-a="admin">Кто пользуется</button>' : ''}<span class="who">${esc(S.user.name)}</span><button class="btn ghost sm" data-a="logout">Выйти</button>`) + `
+  app.innerHTML = topBar(`<span class="sp"></span><button class="btn ghost sm" data-a="changelog" title="Что изменилось в «Нитке»">Что нового</button>${S.user.admin ? '<button class="btn ghost sm" data-a="admin">Кто пользуется</button>' : ''}<span class="who">${esc(S.user.name)}</span><button class="btn ghost sm" data-a="logout">Выйти</button>`) + `
   <main class="home">
     <div class="home-head"><div><h1>${P.length ? 'Мои походы' : `Привет, ${esc(S.user.name)}!`}</h1>
       <p>${P.length ? 'Сами карты хранятся ' + S.cfg.keep_days + ' дней, а поход со всеми настройками — всегда: пересоберёшь в один клик.' : 'Здесь будут твои походы. Начни с первого — понадобится трек: GPX, KML или ссылка nakarte.me.'}</p></div></div>
@@ -286,6 +286,7 @@ function renderHome() {
     </div></main>
   <button type="button" class="mascot" id="mascot" aria-label="Турист"><img src="/static/img/logo.png" alt=""></button><div class="bubble mbubble" id="mbubble" hidden></div>`;
   homeLive();
+  if ((S.news || []).length) setTimeout(() => { if (!document.querySelector('.veil')) showNews(); }, 900);      // что нового с прошлого захода
   const withTrack = P.filter(p => p.card && p.card.km), total = withTrack.reduce((a, p) => a + p.card.km, 0), ready = P.filter(p => p.build && p.build.state === 'done' && p.build.n);
   const lines = !P.length ? ['Начнём? Жми «Новый поход».', 'Нужен только трек: GPX, KML или ссылка nakarte.', 'Первый поход — самый памятный.']
     : [`${P.length} ${plural(P.length, 'поход', 'похода', 'походов')}${total ? ` и ${km(total, 0)} км на всех` : ''}. Неплохо!`,
@@ -339,6 +340,21 @@ function modal(html, onMount) {
   document.addEventListener('keydown', esc_); document.body.append(v);
   onMount && onMount(v, close); const f = $('input,select,button.go', v); f && f.focus();
   return close;
+}
+// ---------------------------------------------------------------- что нового
+function newsList(items) {
+  const by = {}; items.forEach(x => (by[x.date] = by[x.date] || []).push(x));
+  return Object.entries(by).map(([d, xs]) => `<div class="news-d">${esc(d)}</div>${xs.map(x => `<div class="news-i"><b>${esc(x.title)}</b><div>${esc(x.text)}</div></div>`).join('')}`).join('');
+}
+function showNews(all) {
+  const items = all || S.news || []; if (!items.length) return;
+  modal(`<h2>${all ? 'Что нового в «Нитке»' : 'Что нового с твоего прошлого захода'}</h2><div class="news">${newsList(items)}</div><div class="acts"><button class="btn go" data-ok>Понятно</button></div>`, (v, close) => {
+    $('[data-ok]', v).onclick = close;
+  });
+  if (!all) { S.news = []; api('POST', '/api/news-seen', {}, false, false).catch(() => { /* покажем ещё раз — не страшно */ }); }
+}
+async function openChangelog() {
+  try { const r = await fetch('/static/changelog.json?' + Date.now()); showNews(await r.json()); } catch (e) { fail(e); }
 }
 function confirmBox(title, text, yes, fn) {
   modal(`<h2>${esc(title)}</h2><div>${text}</div><div class="acts"><button class="btn ghost" data-x>Отмена</button><button class="btn warn" data-y>${esc(yes)}</button></div>`, (v, close) => {
@@ -1371,7 +1387,7 @@ const A = {
   async sugg(el) {
     const what = el.dataset.w; await flush(); el.disabled = true;
     let items;
-    try { items = (await api('POST', `/api/projects/${S.pid}/suggest`, { what }, false, what === 'passes' ? 'Сверяю нитку с каталогом перевалов…' : 'Смотрю, где заканчиваются дни…')).items; } catch (e) { el.disabled = false; return fail(e); }
+    try { items = (await api('POST', `/api/projects/${S.pid}/suggest`, { what }, false, what === 'passes' ? 'Сверяю нитку с каталогом перевалов и картой вершин…' : 'Смотрю, где заканчиваются дни…')).items; } catch (e) { el.disabled = false; return fail(e); }
     el.disabled = false;
     if (!items.length) {
       if (what === 'passes' && !P().meta.no_passes) { P().meta.no_passes = true; dirty(); paintPanel(); }      // искали — рядом с ниткой ничего нет: больше не напоминаем
@@ -1382,7 +1398,7 @@ const A = {
       ? `<label class="srow"><input type="checkbox" data-i="${i}" checked><span class="ico">${sym('camp')}</span><span><div class="t">${o.date ? 'Ночёвка ' + dmy(o.date) : 'Ночёвка после дня ' + o.after_day}${o.nights > 1 ? ` · ${o.nights} ночи` : ''}</div><div class="s">${esc(o.note)}</div></span></label>`
       : `<label class="srow"><input type="checkbox" data-i="${i}" ${o.sure ? 'checked' : ''}><span class="ico">${gbadge(o.grade)}</span><span><div class="t">${esc(o.name)}${o.h ? `, ${o.h} м` : ''}</div><div class="s">день ${o.day} · ${o.sure ? 'на нитке' : 'в ' + o.dist + ' м от нитки'}${o.alt ? ' · ' + esc(o.alt) : ''}${o.note ? ' · ' + esc(o.note) : ''}</div></span></label>`;
     modal(`<h2>${what === 'camps' ? 'Ночёвки по концам дней' : 'Перевалы и вершины по маршруту'}</h2>
-      <div class="hint">${what === 'camps' ? 'Ночёвка ставится там, где кончается трек дня. Потом её можно подвинуть на карте и подписать.' : 'По каталогу перевалов Вестры. Отмечены те, через которые нитка проходит; те, что в стороне, — на твой выбор. Названия, категории и высоты потом можно поправить.'}</div>
+      <div class="hint">${what === 'camps' ? 'Ночёвка ставится там, где кончается трек дня. Потом её можно подвинуть на карте и подписать.' : 'Перевалы и вершины — по каталогу Вестры, горы без категории — по карте OpenStreetMap. Отмечены те, через которые нитка проходит; те, что в стороне, — на твой выбор. Названия, категории и высоты потом можно поправить.'}</div>
       <div class="slist">${items.map(row).join('')}</div>
       <div class="acts"><button class="btn ghost" data-all>Снять все</button><span style="flex:1"></span><button class="btn ghost" data-x>Отмена</button><button class="btn go" data-ok>Добавить</button></div>`, (v, close) => {
       $('.modal', v).classList.add('wide');
@@ -1472,6 +1488,7 @@ A.pundo = el => trackEdit({ piece: el.dataset.id, action: 'undo' }, 'Отмен�
 A.preset = el => trackEdit({ piece: el.dataset.id, action: 'reset' }, 'Возвращаю исходный трек…');
 A.gstep = el => { S.gstep = +el.dataset.v; paintPanel(); };
 A.gsplit = el => { S.gsplit = el.dataset.v; paintPanel(); };
+A.changelog = () => openChangelog();
 A.importas = el => { S.importAs = el.dataset.v; paintPanel(); };
 A.mkvars = el => { const ids = daysModel().loose.map(p => p.id); return varOp({ action: 'make', pieces: ids, kind: el.dataset.k }, 'Делаю варианты…'); };
 A.vkind = el => { const v = (P().variants || []).find(x => x.id === el.dataset.id); if (!v) return; v.kind = el.dataset.v; P().pieces.forEach(p => { if (p.var === v.id) p.role = v.kind; }); dirty(); paintPanel(); drawPieces(); };

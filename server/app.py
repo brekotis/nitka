@@ -54,8 +54,11 @@ def init_db():
       CREATE INDEX IF NOT EXISTS projects_user ON projects(user_id, updated);
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
     ''')
-    if 'origin' not in [r[1] for r in c.execute('PRAGMA table_info(users)')]:
+    cols = [r[1] for r in c.execute('PRAGMA table_info(users)')]
+    if 'origin' not in cols:
         c.execute('ALTER TABLE users ADD COLUMN origin TEXT')        # «откуда вы» — турклуб, город и т. п.
+    if 'news_seen' not in cols:
+        c.execute('ALTER TABLE users ADD COLUMN news_seen INTEGER')  # номер последней новости, которую человек видел
     c.commit()
 
 def user_key(name):
@@ -129,6 +132,17 @@ def save_project(pid, uid, proj, create=False):
     if create: c.execute('INSERT INTO projects(id,user_id,title,json,card,created,updated) VALUES(?,?,?,?,?,?,?)', (pid, uid, proj['meta']['title'], js, card, now, now))
     else: c.execute('UPDATE projects SET title=?, json=?, card=?, updated=? WHERE id=? AND user_id=?', (proj['meta']['title'], js, card, now, pid, uid))
     c.commit()
+
+def changelog():
+    """Что нового (web/changelog.json, новые сверху) — перечитывается, когда файл меняется."""
+    p = os.path.join(WEB, 'changelog.json')
+    try:
+        mt = os.path.getmtime(p)
+        if _CL.get('mt') != mt:
+            with open(p, encoding='utf-8') as f: _CL.update(mt=mt, items=json.load(f))
+    except (OSError, ValueError): return []
+    return _CL.get('items', [])
+_CL = {}
 
 def dist_ok(a, b): return classify.dist(tuple(a[:2]), tuple(b[:2]))
 
@@ -453,8 +467,16 @@ class H(BaseHTTPRequestHandler):
 
     def api(self, m, a, q):
         if a == ['me']:
-            u = self.uid(); r = db().execute('SELECT * FROM users WHERE id=?', (u,)).fetchone() if u else None
-            return self.send(200, dict(user=dict(name=r['name'], origin=r['origin'] or '', admin=r['key'] in ADMINS) if r else None, need_code=bool(CODE), keep_days=KEEP_DAYS))
+            u = self.uid(); c = db(); r = c.execute('SELECT * FROM users WHERE id=?', (u,)).fetchone() if u else None
+            news = []
+            if r:
+                if not r['seen'] or time.time() - r['seen'] > 600: c.execute('UPDATE users SET seen=? WHERE id=?', (time.time(), r['id'])); c.commit()      # последний заход
+                news = [x for x in changelog() if x['n'] > (r['news_seen'] or 0)]
+            return self.send(200, dict(user=dict(name=r['name'], origin=r['origin'] or '', admin=r['key'] in ADMINS) if r else None, need_code=bool(CODE), keep_days=KEEP_DAYS, news=news))
+        if a == ['news-seen'] and m == 'POST':      # «понятно» — новости до этой включительно больше не показываются
+            uid = self.need_user(); last = max((x['n'] for x in changelog()), default=0)
+            db().execute('UPDATE users SET news_seen=? WHERE id=?', (last, uid)); db().commit()
+            return self.send(200, dict(ok=True))
         if a == ['login'] and m == 'POST':
             d = self.json(); name = str(d.get('name') or '')
             key, shown = user_key(name)
@@ -464,7 +486,7 @@ class H(BaseHTTPRequestHandler):
             if CODE and not hmac.compare_digest(str(d.get('code') or '').strip().lower(), CODE.lower()):
                 raise Err(403, 'Кодовое слово клуба не подошло.')
             if not r:
-                c.execute('INSERT INTO users(key,name,created,seen) VALUES(?,?,?,?)', (key, shown, time.time(), time.time())); c.commit()
+                c.execute('INSERT INTO users(key,name,created,seen,news_seen) VALUES(?,?,?,?,?)', (key, shown, time.time(), time.time(), max((x['n'] for x in changelog()), default=0))); c.commit()
                 r = c.execute('SELECT * FROM users WHERE key=?', (key,)).fetchone(); new = True
             else:
                 c.execute('UPDATE users SET seen=? WHERE id=?', (time.time(), r['id'])); c.commit(); new = False

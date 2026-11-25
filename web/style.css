@@ -583,3 +583,9 @@ table.sum:not(.adm) td.w { white-space: normal; min-width: 12em; width: auto; }
 /* правка куска: «Править на карте» — у выделенного куска; «отменить» и «вернуть» — у правленого всегда */
 .day .pc:not(.sel) .pedit .only-sel { display: none; }
 .day .pc:not(.sel) .pedit:not(.has) { display: none; }
+
+/* ---------- что нового */
+.news { display: grid; gap: 10px; max-height: min(60vh, 520px); overflow-y: auto; padding-right: 4px; }
+.news-d { font: 700 12.5px var(--head); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
+.news-i { display: grid; gap: 3px; padding: 8px 12px; border-left: 4px solid var(--sun); background: var(--sky-xl); border-radius: 0 10px 10px 0; font-size: 14px; line-height: 1.45; }
+.news-i b { font: 800 16px var(--head); color: var(--navy); letter-spacing: .02em; }

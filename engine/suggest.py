@@ -2,7 +2,7 @@
 
 Ничего не добавляет само — возвращает списки, человек выбирает.
 """
-import gzip, json, math, os, re, time, urllib.request
+import gzip, json, math, os, re, time, urllib.parse, urllib.request
 from datetime import date, timedelta
 from . import mapkit
 from .classify import OBJ_TYPES, dist
@@ -59,6 +59,33 @@ def _seg_dist(p, a, b, k):
     t = 0.0 if L2 == 0 else max(0.0, min(1.0, -(ax * dx + ay * dy) / L2))
     return math.hypot(ax + dx * t, ay + dy * t) * 111195.0
 
+OVERPASS = ('https://maps.mail.ru/osm/tools/overpass/api/interpreter', 'https://overpass-api.de/api/interpreter')
+
+def osm_peaks(la0, la1, lo0, lo1):
+    """Именованные вершины OpenStreetMap в прямоугольнике: [(lat, lon, name, ele)]. Кэш на 30 дней; нет связи — пусто."""
+    key = f'{la0:.2f}_{la1:.2f}_{lo0:.2f}_{lo1:.2f}'
+    path = os.path.join(mapkit.CACHE, 'osm_peaks', key + '.json')
+    try:
+        if time.time() - os.path.getmtime(path) < 30 * 86400:
+            with open(path, encoding='utf-8') as f: return json.load(f)
+    except OSError: pass
+    q = f'[out:json][timeout:40];node["natural"~"^(peak|volcano)$"]["name"]({la0:.4f},{lo0:.4f},{la1:.4f},{lo1:.4f});out;'
+    for url in OVERPASS:
+        try:
+            req = urllib.request.Request(url, data=urllib.parse.urlencode(dict(data=q)).encode(), headers={'User-Agent': mapkit.UA})
+            with urllib.request.urlopen(req, timeout=50) as r: d = json.loads(r.read().decode('utf-8'))
+        except Exception: continue
+        out = []
+        for e in d.get('elements', []):
+            t = e.get('tags', {})
+            try: ele = int(float(str(t.get('ele', '')).replace(',', '.').split()[0])) if t.get('ele') else None
+            except (ValueError, IndexError): ele = None
+            out.append((e['lat'], e['lon'], t.get('name:ru') or t.get('name'), ele))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f: json.dump(out, f, ensure_ascii=False)
+        return out
+    return []
+
 def passes(proj, radius=400.0, sure=150.0):
     """Перевалы и вершины каталога у нитки: [{type, name, grade, h, lat, lon, day, dist, sure, note}] по ходу маршрута."""
     chains = day_chains(proj)
@@ -89,6 +116,23 @@ def passes(proj, radius=400.0, sure=150.0):
         note = '; '.join(x for x in [str(c.get('connects') or '').strip(), ('склоны: ' + str(c['slopes']).strip()) if c.get('slopes') else ''] if x)
         out.append(dict(type='peak' if summit else 'pass', name=name, grade=GR.get(str(c.get('grade_eng') or '').lower()), h=h, lat=round(la, 6), lon=round(lo, 6),
                         day=best[1], i=best[2], dist=int(round(best[0])), sure=best[0] <= sure, note=note[:240], alt=(c.get('altnames') or '')[:80]))
+    # горы без категории — из OpenStreetMap: нитка проходит через вершину или рядом (Лявйок, Чивруайлатв…)
+    norm = lambda n: re.sub(r'^(г\.|гора|в\.|вершина|пик)\s*', '', (n or '').lower()).replace('ё', 'е').strip()
+    names = {norm(q.get('name')) for q in proj.get('points', []) if q.get('type') in OBJ_TYPES} | {norm(o['name']) for o in out}
+    for la, lo, nm, ele in osm_peaks(la0, la1, lo0, lo1):
+        if not nm or norm(nm) in names: continue
+        k = math.cos(math.radians(la)); best = None
+        for d, pts in chains.items():
+            for i in range(len(pts) - 1):
+                a, b = pts[i], pts[i + 1]
+                if min(abs(a[0] - la), abs(b[0] - la)) > 0.02 or min(abs(a[1] - lo), abs(b[1] - lo)) > 0.03: continue
+                dd = _seg_dist((la, lo), a, b, k)
+                if best is None or dd < best[0] - 1e-6: best = (dd, d, i)
+        if not best or best[0] > radius: continue
+        if any(dist(h, (la, lo)) < 300 for h in have) or any(dist((o['lat'], o['lon']), (la, lo)) < 300 for o in out): continue
+        names.add(norm(nm))
+        out.append(dict(type='peak', name='г. ' + nm if not re.match(r'(г\.|гора|пик|вершина)\s', nm, re.I) else nm, grade=None, h=ele, lat=round(la, 6), lon=round(lo, 6),
+                        day=best[1], i=best[2], dist=int(round(best[0])), sure=best[0] <= sure, note='вершина по карте OpenStreetMap', alt=''))
     out.sort(key=lambda o: (o['day'], o['i']))
     for o in out: o.pop('i')
     return out
