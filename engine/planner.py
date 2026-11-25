@@ -97,13 +97,43 @@ def apply(proj, plan):
         elif k['kind'] in ('pass', 'peak'):
             nm = k['name'] or ('перевал' if k['kind'] == 'pass' else 'вершина')
             proj['points'].append(dict(base, type=k['kind'], name=nm, grade=k['grade'], day=day_of.get(i)))
+    # перевалы каталога, через которые нарисованная нитка переваливает, но они не отмечены, — тоже в точки похода
+    added = 0
+    if ele:
+        try:
+            from . import routegen, suggest, terrain
+            G = [[q[0], q[1]] for d, _, _ in days for q in d]
+            E = [ele(q) for q in G]; D = [0.0]
+            for i in range(1, len(G)): D.append(D[-1] + dist(G[i - 1], G[i]))
+            have = {k['ref'] for k in K if k.get('ref')}
+            la0, la1 = min(q[0] for q in G) - 0.01, max(q[0] for q in G) + 0.01; lo0, lo1 = min(q[1] for q in G) - 0.01, max(q[1] for q in G) + 0.01
+            keyD = []
+            for k in K:
+                if k['kind'] in ('pass', 'peak'):
+                    i = routegen._near_idx(G, (k['lat'], k['lon']), 300)
+                    if i is not None: keyD.append(D[i])
+            seen = []
+            for c in suggest.catalog():
+                if c.get('is_summit'): continue
+                it = routegen._cat_item(c)
+                if not it or it['id'] in have or not (la0 <= it['p'][0] <= la1 and lo0 <= it['p'][1] <= lo1): continue
+                i = routegen._near_idx(G, it['p'])
+                if i is None or not terrain.crosses(G, E, D, i) or any(abs(D[i] - d) < 800 for d in keyD + seen): continue
+                seen.append(D[i])
+                ends_, acc = [], 0.0
+                for d_ in days: acc += length_km(d_[0]) * 1000; ends_.append(acc)
+                dn = next((n for n, e_ in enumerate(ends_, 1) if D[i] <= e_ + 1), len(days))
+                proj['points'].append(dict(id=uid(), src='plan', lat=round(it['p'][0], 6), lon=round(it['p'][1], 6), h=it['h'], on_map=True,
+                                           type='pass', name=it['name'], grade=it['grade'], day=dn))
+                added += 1
+        except Exception: pass
     proj['plan'] = P
     proj.setdefault('meta', {})
     if not proj['meta'].get('mode'): proj['meta']['mode'] = 'plan'
     nd = len(days)
     return dict(ok=True, days=nd, km=round(total, 1),
                 msg=f'Маршрут в походе: {nd} {"день" if nd % 10 == 1 and nd % 100 != 11 else "дня" if 2 <= nd % 10 <= 4 and not 12 <= nd % 100 <= 14 else "дней"}, '
-                    f'{str(round(total, 1)).replace(".", ",")} км. Дальше — точки и карты, как обычно.')
+                    f'{str(round(total, 1)).replace(".", ",")} км.' + (f' По пути нитка переваливает ещё через {added} {"перевал" if added % 10 == 1 and added % 100 != 11 else "перевала" if 2 <= added % 10 <= 4 and not 12 <= added % 100 <= 14 else "перевалов"} из каталога — они добавлены в точки.' if added else '') + ' Дальше — точки и карты, как обычно.')
 
 
 def elevations(pts):

@@ -778,6 +778,9 @@ svg.plprof .phx { stroke: #133C6A; stroke-width: 1; vector-effect: non-scaling-s
 .gp { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px 2px 2px; border-radius: 999px; background: #F1F4F8; font-size: 12.5px; color: var(--navy); }
 .gp b { background: var(--g); color: #fff; border-radius: 999px; padding: 1px 6px; font: 800 11px var(--head); }
 .gp i { font-style: normal; color: var(--muted); }
+.gp.extra { background: #fff; border: 1.5px dashed #7d8a99; } .gp u { text-decoration: none; font-size: 11px; color: var(--muted); }
+.gp.bad { background: #FFE9EA; } .gp button { border: 0; background: var(--navy); color: #fff; border-radius: 50%; width: 18px; height: 18px; font: 800 13px/1 var(--body); cursor: pointer; margin-left: 2px; }
+.enroute { display: grid; gap: 6px; padding: 8px 10px; margin: 6px 0; border-radius: 12px; background: #FFF6D6; border: 1.5px solid var(--sun); font-size: 13.5px; }
 
 /* ---- подбор: квоты по категориям, выбранные перевалы, ход работы */
 .gq { display: grid; gap: 3px; max-width: 260px; }

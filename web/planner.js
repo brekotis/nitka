@@ -323,7 +323,9 @@ export function createPlanner(ctx) {
       ${G.msg ? `<div class="banner"><div>${esc(G.msg)}</div></div>` : ''}
       ${G.res.length ? `<div class="gvars">${G.res.map((v, i) => `<div class="gvar${i === G.sel ? ' sel' : ''}" data-pl="gsel" data-i="${i}" style="--vc:${VCOL[i % VCOL.length]}">
           <div class="gvh"><b>Вариант ${i + 1}</b><span class="gkm">${String(v.km).replace('.', ',')} км</span><span class="hint">${v.delta > 0 ? '+' : ''}${String(v.delta).replace('.', ',')} к задуманному</span><span>+${v.up} / −${v.dn} м</span></div>
-          <div class="gps">${v.passes.map(p => `<span class="gp" style="--g:${ctx.gcol()[p.grade] || '#7d8a99'}" title="${esc(p.note || '')}"><b>${esc(p.grade || '')}</b>${esc(p.name.replace(/^пер\.\s*/, ''))}${p.h ? ` <i>${p.h}</i>` : ''}</span>`).join('')}</div>
+          <div class="gps">${v.passes.map(p => `<span class="gp${p.extra ? ' extra' : ''}${p.crossed === false ? ' bad' : ''}" style="--g:${ctx.gcol()[p.grade] || '#7d8a99'}" title="${esc((p.extra ? 'По пути: нитка сама переваливает через него. ' : '') + (p.crossed === false ? 'Нитка подходит к нему, но не переходит в другую долину. ' : '') + (p.note || ''))}"><b>${esc(p.grade || '?')}</b>${esc(p.name.replace(/^пер\.\s*/, ''))}${p.h ? ` <i>${p.h}</i>` : ''}${p.extra ? ' <u>по пути</u>' : ''}</span>`).join('')}</div>
+          ${(v.over || []).length ? `<div class="warnx">Перевалов больше, чем просил: ${esc(v.over.join('; '))} — с учётом тех, что по пути</div>` : ''}
+          ${(v.uturn || []).length ? `<div class="warnx">${esc(v.uturn.join(', '))}: подход без перехода в другую долину</div>` : ''}
           ${v.camps.length ? `<div class="hint">Ночёвки: ${v.camps.map(c => `${String(c.km).replace('.', ',')} км, ${c.h} м${c.name ? ` — <b>${esc(c.name)}</b>` : ''}`).join(' · ')}</div>` : ''}
           ${v.camps.some(c => c.h > 3300) ? `<div class="warnx">Ночёвка на ${Math.max(...v.camps.map(c => c.h))} м — высоко: дни выходят по гребням или ледникам. Поменяй число дней или передвинь ночёвку.</div>` : ''}
           ${v.nolink ? `<div class="warnx">Без тропы ${v.nolink} из ${v.legs} отрезков — там путь по рельефу</div>` : ''}
@@ -451,6 +453,7 @@ export function createPlanner(ctx) {
       ${P.fromDraft ? '<div class="hint">Это черновик из браузера — в поход он попадёт по «Готово». <a href="#" data-pl="drop">Отбросить черновик</a></div>' : ''}
       ${other ? '<div class="banner"><div>В походе уже есть загруженный трек — нарисованный маршрут добавится к нему как основная нитка. Если это вариант, отметь его в «Днях».</div></div>' : ''}
       ${n > 1 ? `<div class="pltot">${pr ? `<b>${kmTxt(pr.all.km * 1000)} км</b><span>+${pr.all.up} м</span><span>−${pr.all.dn} м</span>` : ''}<span>${pr && pr.days ? `${pr.days.length} ${pl(pr.days.length, 'день', 'дня', 'дней')}` : ''}</span>${busy ? `<span class="hint">ищу тропы: ${busy}</span>` : ''}${bad ? `<span class="warnx">без тропы: ${bad}</span>` : ''}</div>${profSvg()}` : ''}
+      ${enrouteHtml()}
       ${pr && pr.days && pr.days.length > 1 ? `<div class="pldays">${pr.days.map((d, i) => `<div><b>День ${i + 1}</b><span>${kmTxt(d.km * 1000)} км</span><span>+${d.up}</span><span>−${d.dn}</span></div>`).join('')}</div>` : ''}
       <div class="plist">${P.pts.map((p, i) => `
         <div class="plp${P.sel === i ? ' sel' : ''}" data-i="${i}"><span class="plk mini ${p.kind}${i === 0 ? ' start' : i === n - 1 && i > 0 ? ' finish' : ''}">${p.kind === 'via' ? i + 1 : sym(p.kind)}</span>
@@ -461,6 +464,35 @@ export function createPlanner(ctx) {
         ${i < n - 1 ? `<div class="pll"><span class="seg sm"><button class="${legs[i].mode === 'trail' ? 'on' : ''}" data-pl="lmode" data-i="${i}" data-v="trail" title="По тропам; к точке вне тропы — подход по рельефу">тропа</button><button class="${legs[i].mode === 'terrain' ? 'on' : ''}" data-pl="lmode" data-i="${i}" data-v="terrain" title="Без тропы — по склонам, в обход круч">рельеф</button><button class="${legs[i].mode === 'line' ? 'on' : ''}" data-pl="lmode" data-i="${i}" data-v="line" title="Прямой линией">прямо</button></span>
           <span>${st(i)}</span>${degTxt(i)}${legs[i].busy ? `<span class="hint">${legs[i].mode === 'terrain' ? 'считаю по рельефу…' : 'ищу тропу…'}</span>` : !legs[i].ok ? `<span class="warnx">${esc(legs[i].msg || 'тропы нет — по рельефу')}</span>` : ''}</div>` : ''}`).join('')}</div>
       ${n ? '<div class="hint">Правый клик по точке на карте — убрать её. Ctrl+Z — отменить.</div>' : ''}`}`;
+  }
+  // нитка переваливает через седловину: местный максимум высоты, до и после — ниже на 80+ м (как на сервере)
+  function crossesAt(E, D, i) {
+    const n = E.length; let lo = i, hi = i;
+    while (lo > 0 && D[i] - D[lo] < 350) lo--; while (hi < n - 1 && D[hi] - D[i] < 350) hi++;
+    let top = -1e9; for (let k = lo; k <= hi; k++) top = Math.max(top, E[k]);
+    if (E[i] < top - 60) return false;
+    let a = i, b = i; while (a > 0 && D[i] - D[a] < 1200) a--; while (b < n - 1 && D[b] - D[i] < 1200) b++;
+    let m1 = E[a], m2 = E[b]; for (let k = lo; k <= i; k++) m1 = Math.min(m1, E[k]); for (let k = i; k <= hi; k++) m2 = Math.min(m2, E[k]);
+    return a < i && i < b && m1 < top - 80 && m2 < top - 80;
+  }
+  function enroute() {
+    const pr = P.prof; if (!pr || pr.stale || !pr.R) return [];
+    const have = new Set(P.pts.map(p => p.ref).filter(Boolean)), out = [];
+    const keyD = P.pts.map((p, i) => pr.D[pr.M[i]]);
+    for (const c of P.cat.values()) {
+      if (c.kind !== 'pass' || have.has(c.id)) continue;
+      let best = null;
+      for (let i = 0; i < pr.R.length; i++) { const q = pr.R[i]; if (Math.abs(q[0] - c.lat) > 0.004 || Math.abs(q[1] - c.lon) > 0.006) continue; const d = geo(q, [c.lat, c.lon]); if (!best || d < best.d) best = { d, i }; }
+      if (!best || best.d > 220 || !crossesAt(pr.E, pr.D, best.i)) continue;
+      if (keyD.some(d => Math.abs(d - pr.D[best.i]) < 600) || out.some(x => Math.abs(pr.D[x.i] - pr.D[best.i]) < 800)) continue;      // эта седловина уже отмечена
+      out.push({ c, i: best.i });
+    }
+    return out.sort((a, b) => a.i - b.i);
+  }
+  function enrouteHtml() {
+    const L_ = enroute(); P.enroute = L_; if (!L_.length) return '';
+    return `<div class="enroute"><div><b>По пути нитка переваливает и через:</b></div><div class="gps">${L_.map((x, k) => `<span class="gp" style="--g:${ctx.gcol()[x.c.grade] || '#7d8a99'}"><b>${esc(x.c.grade || '?')}</b>${esc(x.c.title.replace(/^пер\.\s*/, ''))}${x.c.h ? ` <i>${x.c.h}</i>` : ''}<button data-pl="enadd" data-i="${k}" title="Отметить перевалом маршрута">+</button></span>`).join('')}</div>
+      <div class="chips"><button class="btn sm" data-pl="enall">Отметить все</button><span class="hint">иначе их не будет ни в точках похода, ни в квотах</span></div></div>`;
   }
   function onClick(e) {
     if (!P) return;
@@ -477,6 +509,8 @@ export function createPlanner(ctx) {
     else if (a === 'grun') genRun(false); else if (a === 'gmore') genRun(true);
     else if (a === 'gsel') { if (e.target.closest('[data-pl="gtake"]')) return; P.gen.sel = i; genRender(); ctx.repaint(); }
     else if (a === 'gtake') genTake();
+    else if (a === 'enadd') { const x = (P.enroute || [])[i]; if (x) addCat(x.c); }
+    else if (a === 'enall') { const L_ = (P.enroute || []).slice(); if (!L_.length) return; snap(); const u0 = P.undo.length; L_.forEach(x => addCat(x.c)); P.undo.splice(u0, P.undo.length - u0); toast(`Отмечено перевалов: ${L_.length}`); }
     else if (a === 'gmore3') { P.gen.more3 = true; ctx.repaint(); }
     else if (a === 'gunpick') { const id = b.dataset.id; P.gen.must = P.gen.must.filter(x => x.id !== id); P.gen.ban = P.gen.ban.filter(x => x.id !== id); drawCat(); ctx.repaint(); }
     else if (a === 'goto') { const f = P.found[i], map = getMap(); P.found = null; if (f.bbox) map.fitBounds([[f.bbox[0], f.bbox[2]], [f.bbox[1], f.bbox[3]]], { maxZoom: 13 }); else map.setView([f.lat, f.lon], 12); ctx.repaint(); }

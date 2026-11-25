@@ -105,6 +105,59 @@ def path(a, b, pad=0.35):
     return pts, dict(km=round(sum(dist(p, q) for p, q in zip(pts, pts[1:])) / 1000, 2), maxdeg=max_slope(pts))
 
 
+_SADDLE = {}
+
+def saddle(p, h=None):
+    """Седловина перевала по рельефу: две долины по разные стороны гребня.
+    Вокруг перевала на кругах 400–900 м ищется самое низкое направление (первая долина) и самое низкое в противоположной
+    стороне (вторая); гребень — направления поперёк, они выше седловины. Из каждой стороны точка спускается по направлению,
+    пока не станет на 250 м ниже перевала (до 2,5 км) — это «вход» и «выход».
+    → (сторона_1, сторона_2, высота седловины) или None, если по рельефу это не седловина (плато, гребень, неточные координаты)."""
+    key = (round(p[0], 5), round(p[1], 5))
+    if key in _SADDLE: return _SADDLE[key]
+    k = math.cos(math.radians(p[0]))
+    at = lambda ang, r: (p[0] + r * math.cos(math.radians(ang)) / 110540, p[1] + r * math.sin(math.radians(ang)) / (111320 * k))
+    angs = list(range(0, 360, 10)); rad = (400, 650, 900)
+    probe = [at(a_, r) for a_ in angs for r in rad] + [at(a_, r) for a_ in angs for r in range(1000, 2600, 150)] + [tuple(p)]
+    try:
+        S = dem.Sampler(probe, z=12)
+        # точка перевала в каталоге бывает неточной: седловина — самая высокая из низких точек рядом не ищем, берём рельеф в 120 м
+        e0 = max(S(*at(a_, 120)) for a_ in range(0, 360, 45)) if h is None else None
+        e0 = S(p[0], p[1]) if e0 is None else min(e0, S(p[0], p[1]) + 60)
+        ring = {a_: sum(S(*at(a_, r)) for r in rad) / len(rad) for a_ in angs}
+    except Exception:
+        _SADDLE[key] = None; return None
+    a1 = min(angs, key=lambda a_: ring[a_])
+    opp = [a_ for a_ in angs if abs(((a_ - a1 + 180) % 360) - 180) >= 120]
+    a2 = min(opp, key=lambda a_: ring[a_])
+    side = [a_ for a_ in angs if 60 <= abs(((a_ - a1 + 180) % 360) - 180) <= 120]
+    ridge = max(ring[a_] for a_ in side) if side else e0
+    if not (ring[a1] < e0 - 50 and ring[a2] < e0 - 50 and ridge > min(ring[a1], ring[a2]) + 80):
+        _SADDLE[key] = None; return None
+    def down(ang):
+        last = at(ang, 900)
+        for r in range(1000, 2600, 150):
+            q = at(ang, r); last = q
+            if S(*q) <= e0 - 250: break
+        return [round(last[0], 6), round(last[1], 6)]
+    res = (down(a1), down(a2), int(round(e0)))
+    _SADDLE[key] = res
+    return res
+
+
+def crosses(G, E, D, i, win=350.0, drop=80.0):
+    """Нитка переваливает в точке i: это местный максимум высоты (±350 м по пути), а до и после (через ~1,2 км) — ниже на 80+ м."""
+    n = len(G); lo = hi = i
+    while lo > 0 and D[i] - D[lo] < win: lo -= 1
+    while hi < n - 1 and D[hi] - D[i] < win: hi += 1
+    top = max(E[lo:hi + 1])
+    if E[i] < top - 60: return False
+    a = b = i
+    while a > 0 and D[i] - D[a] < 1200: a -= 1
+    while b < n - 1 and D[b] - D[i] < 1200: b += 1
+    return min(E[lo:i + 1] + [E[a]]) < top - drop and min(E[i:hi + 1] + [E[b]]) < top - drop and a < i < b
+
+
 def trail_leg(a, b, kind='', approach=250.0):
     """Отрезок по тропам (BRouter), а где тропа не доходит до точки — подход по рельефу (к перевалу от последней тропы).
     Тропы нет вовсе или BRouter уводит в обход через полрайона — весь отрезок по рельефу.
