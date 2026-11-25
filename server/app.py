@@ -11,7 +11,7 @@ os.makedirs(DATA, exist_ok=True)
 os.environ.setdefault('NITKA_CACHE', os.path.join(DATA, 'cache'))
 sys.path.insert(0, ROOT)
 from engine import classify, importers, mapkit, model, suggest          # noqa: E402
-from engine import sheets as sheets_mod, chrono          # noqa: E402
+from engine import sheets as sheets_mod, chrono, trackfix          # noqa: E402
 
 WEB = os.path.join(ROOT, 'web')
 RENDERS = os.path.join(DATA, 'renders')
@@ -130,6 +130,8 @@ def save_project(pid, uid, proj, create=False):
     else: c.execute('UPDATE projects SET title=?, json=?, card=?, updated=? WHERE id=? AND user_id=?', (proj['meta']['title'], js, card, now, pid, uid))
     c.commit()
 
+def dist_ok(a, b): return classify.dist(tuple(a[:2]), tuple(b[:2]))
+
 def _local_date(ts, tz):
     return time.strftime('%Y-%m-%d', time.gmtime(ts + tz * 3600))
 
@@ -139,7 +141,8 @@ def for_client(proj):
     tz = classify.trip_tz(proj, next((p['pts'][0][1] for p in proj.get('pieces', []) if p.get('pts')), None))
     for p in proj.get('pieces', []):
         ts = classify.piece_times(p)
-        if 'tm' in p or 't0' in p: p = {k: v for k, v in p.items() if k not in ('tm', 't0')}
+        if any(k in p for k in ('tm', 't0', 'orig', 'hist')):
+            p = dict({k: v for k, v in p.items() if k not in ('tm', 't0', 'orig', 'hist')}, edited='orig' in p, undo=len(p.get('hist') or []))
         if ts:
             ti = classify.time_info(p['pts'], ts)
             if ti: p = dict(p, tinfo=dict(start=classify.hm(ti['start'], tz), end=classify.hm(ti['end'], tz), move=ti['move'], date=_local_date(ti['start'], tz),
@@ -608,6 +611,24 @@ class H(BaseHTTPRequestHandler):
                 r = classify.day_radial(proj, day)
                 if r['ok']: save_project(pid, uid, proj)
                 return self.send(200, dict(project=for_client(proj), **r))
+            if sub == 'check' and m == 'GET':      # что не так с треком: выбросы, разрывы
+                return self.send(200, dict(items=trackfix.check(proj)))
+            if sub == 'track-edit' and m == 'POST':      # вырезать выброс, перерисовать участок, отменить, вернуть как было
+                r = trackfix.edit(proj, self.json())
+                if r['ok']: save_project(pid, uid, proj)
+                return self.send(200, dict(project=for_client(proj), **r))
+            if sub == 'route' and m == 'GET':      # путь по тропам между двумя точками (BRouter) — для перерисовки и вариантов
+                try: a = [float(x) for x in q['a'].split(',')]; b = [float(x) for x in q['b'].split(',')]
+                except (KeyError, ValueError): raise Err(400, 'Нужны точки a и b.')
+                if dist_ok(a, b) > 30000: raise Err(400, 'Слишком далеко для одного отрезка — поставь промежуточные точки.')
+                pts = trackfix.route(a, b, proj['meta'].get('kind') or '')
+                return self.send(200, dict(ok=bool(pts), pts=pts or [], msg='' if pts else 'Тропу не нашёл — соединю прямой.'))
+            if sub == 'export.gpx' and m == 'GET':      # чистый GPX с прореживанием
+                try: step = max(0, min(200, int(q.get('step') or 0)))
+                except ValueError: step = 0
+                data = trackfix.export_gpx(proj, step, 'one' if q.get('split') == 'one' else 'day').encode('utf-8')
+                title = re.sub(r'[\\/:*?"<>|]+', ' ', proj['meta'].get('title') or 'Поход').strip()
+                return self.send(200, data, 'application/gpx+xml', headers={'Content-Disposition': "attachment; filename*=UTF-8''" + urllib.parse.quote(f'{title}{" — каждые " + str(step) + " м" if step else ""}.gpx')})
             if sub == 'chrono' and m == 'POST':      # хронометраж → записи на треке (ещё не точки: турист проверяет и принимает)
                 text = str(self.json().get('text') or '')[:60000]
                 return self.send(200, chrono.place(proj, text))

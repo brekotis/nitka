@@ -450,10 +450,69 @@ async function varOp(body, msg) {
   catch (e) { fail(e); }
 }
 let drawLayer = null;
+// ---------------------------------------------------------------- проверка трека, правка на карте, чистый GPX
+function trackCheck() {      // что не так с треком — спрашиваем сервер, когда меняются куски
+  const key = S.pid + '|' + P().pieces.map(p => [p.id, p.km, p.role, p.undo || 0].join(':')).join(',');
+  if (S.tcKey !== key) {
+    S.tcKey = key; S.tc = null;
+    flush().then(() => api('GET', `/api/projects/${S.pid}/check`, undefined, false, false))
+      .then(d => { if (S.tcKey === key) { S.tc = d.items; if (S.step === 'tracks') paintPanel(); } }).catch(() => { if (S.tcKey === key) S.tc = []; });
+  }
+  return S.tc;
+}
+function checkBlock() {
+  const F = trackCheck();
+  if (F === null) return `<div class="sec"><h3>Проверка трека</h3><div class="hint">Смотрю, нет ли выбросов и разрывов сигнала…</div></div>`;
+  if (!F.length) return `<div class="sec"><h3>Проверка трека</h3><div class="hint">Выбросов и разрывов сигнала не нашлось.</div></div>`;
+  return `<div class="sec"><h3>Проверка трека <small>${F.length}</small></h3><div class="finds">${F.map((f, i) => {
+    const where = esc([f.name, f.day ? 'день ' + f.day : '', f.at || ''].filter(Boolean).join(' · '));
+    return f.kind === 'excursion'
+      ? `<div class="find"><span class="fi red">!</span><div><b>Выброс: трек улетел на ${km(f.km)} км и вернулся</b><div class="hint">${where} · ${f.pts} ${plural(f.pts, 'точка', 'точки', 'точек')} — похоже на сбой GPS (спуфинг)</div></div>
+          <div class="chips"><button class="btn sm" data-a="tcshow" data-i="${i}">Показать</button><button class="btn sm go" data-a="tccut" data-i="${i}">Вырезать</button></div></div>`
+      : `<div class="find"><span class="fi blue">…</span><div><b>Разрыв сигнала: ${Math.round(f.km * 1000)} м без точек${f.mins ? `, ${f.mins} мин` : ''}</b><div class="hint">${where} · на карте здесь прямая</div></div>
+          <div class="chips"><button class="btn sm" data-a="tcshow" data-i="${i}">Показать</button><button class="btn sm" data-a="tcdraw" data-i="${i}">Дорисовать</button></div></div>`;
+  }).join('')}</div><div class="hint">Любую правку можно отменить: «Отменить правку» и «Вернуть как было» — у куска на шаге «Дни».</div></div>`;
+}
+function exportBlock() {
+  const st = S.gstep ?? 30, sp = S.gsplit || 'day';
+  return `<div class="sec"><h3>Скачать чистый GPX</h3><div class="hint">Нитка по дням, варианты и точки — без «звёздочек» и вырезанных выбросов, с временем, если оно было. Для nakarte, навигатора или анализа.</div>
+    <div class="field"><span>Прореживание</span><div class="chips">${[[0, 'не прореживать'], [10, '10 м'], [30, '30 м'], [50, '50 м']].map(([v, t]) => `<button class="chip${st === v ? ' on' : ''}" data-a="gstep" data-v="${v}">${t}</button>`).join('')}</div></div>
+    <div class="chips">${[['day', 'по дням'], ['one', 'одним треком']].map(([v, t]) => `<button class="chip${sp === v ? ' on' : ''}" data-a="gsplit" data-v="${v}">${t}</button>`).join('')}
+      <a class="btn sm go" href="/api/projects/${S.pid}/export.gpx?step=${st}&split=${sp}" download>Скачать GPX</a></div></div>`;
+}
+let editLayer = null;
+function showStretch(p, i0, i1, fit) {      // участок куска — красным поверх карты
+  if (!map) return; if (!editLayer) editLayer = L.layerGroup().addTo(map); editLayer.clearLayers();
+  const ll = p.pts.slice(Math.max(0, i0), i1 + 1).map(q => [q[0], q[1]]); if (ll.length < 1) return;
+  L.polyline(ll, { color: '#fff', weight: 9, opacity: .9, interactive: false }).addTo(editLayer);
+  L.polyline(ll, { color: '#E2001A', weight: 5, dashArray: '6 6', interactive: false }).addTo(editLayer);
+  if (fit) { if (isPhone() && mapSize() !== 'big') { S.mapTemp = 'big'; applyMapSize(); } map.fitBounds(L.latLngBounds(ll).pad(0.3), { maxZoom: 15 }); }
+}
+function nearestIdx(p, latlng) {      // ближайшая точка куска к клику (в пикселях экрана)
+  const cp = map.latLngToContainerPoint(latlng); let best = null;
+  p.pts.forEach((q, i) => { const c = map.latLngToContainerPoint([q[0], q[1]]); const d = (c.x - cp.x) ** 2 + (c.y - cp.y) ** 2; if (!best || d < best.d) best = { d, i }; });
+  return best && best.d < 42 * 42 ? best.i : null;
+}
+async function addDrawPoint(q) {      // точка нового пути; «по тропе» — путь от предыдущей точки ищет BRouter
+  const pts = S.drawPts = S.drawPts || []; S.drawSteps = S.drawSteps || [];
+  const e = S.edit, p = e && pieceById(e.piece);
+  const prev = pts.length ? pts[pts.length - 1] : (S.mode === 'redraw' && p ? p.pts[e.i0] : null);
+  if (S.routeOn && prev) {
+    try {
+      const r = await api('GET', `/api/projects/${S.pid}/route?a=${prev[0]},${prev[1]}&b=${q[0]},${q[1]}`, undefined, false, 'Ищу тропу…');
+      if (r.ok && r.pts.length > 1) { const add = r.pts.slice(1); pts.push(...add); S.drawSteps.push(add.length); drawPreview(); return; }
+      toast(r.msg || 'Тропу не нашёл — соединяю прямой', true);
+    } catch (err) { toast('Тропу не нашёл — соединяю прямой', true); }
+  }
+  pts.push(q); S.drawSteps.push(1); drawPreview();
+}
 function drawPreview() {
   if (!map) return; if (!drawLayer) drawLayer = L.layerGroup().addTo(map); drawLayer.clearLayers();
-  const pts = S.drawPts || []; if (!pts.length) return;
-  const col = S.drawKind === 'exit' ? '#111827' : '#1F6FD1';
+  let pts = S.drawPts || [];
+  const e = S.edit, ep = S.mode === 'redraw' && e && pieceById(e.piece);
+  if (ep) pts = [[ep.pts[e.i0][0], ep.pts[e.i0][1]], ...pts, [ep.pts[e.i1][0], ep.pts[e.i1][1]]];      // новый путь — между краями участка
+  if (!pts.length) return;
+  const col = S.mode === 'redraw' ? '#0B8A3E' : S.drawKind === 'exit' ? '#111827' : '#1F6FD1';
   L.polyline(pts, { color: '#fff', weight: 7, opacity: .9, interactive: false }).addTo(drawLayer);
   L.polyline(pts, { color: col, weight: 4, dashArray: '9 6', interactive: false }).addTo(drawLayer);
   pts.forEach(q => L.circleMarker(q, { radius: 4, color: col, weight: 2, fillColor: '#fff', fillOpacity: 1, interactive: false }).addTo(drawLayer));
@@ -594,6 +653,7 @@ function stepTracks() {
       <div><b>Фототочки</b> — «день-номер» в папке со словом «Фото»: <code>3-12</code>, <code>3-12,13</code>. <b>Остальное</b> узнаётся по словам: родник, брод, магазин, заброска, пещера…</div>
       <div class="hint">Не угадалось — не страшно: тип любой точки меняется на шаге «Точки».</div></div></details>
     ${has ? `<div class="sec"><h3>Загружено</h3><div class="list">${pr.sources.map(s => `<div class="row" style="cursor:default"><span class="ico">${I.upload.replace('viewBox', 'width="26" height="26" viewBox')}</span><span><div class="t">${esc(s.name)}</div><div class="s">${s.pieces} ${plural(s.pieces, 'трек', 'трека', 'треков')} · ${s.points} ${plural(s.points, 'точка', 'точки', 'точек')}</div></span><button class="icon-btn" data-a="src-del" data-id="${s.id}" title="Убрать этот файл">${I.trash}</button></div>`).join('')}</div></div>
+    ${checkBlock()}${exportBlock()}
     ${nextBtn('days', 'Дальше: дни')}` : ''}`;
 }
 function bindDrop() {
@@ -629,7 +689,8 @@ function pieceRow(p, maxDay) {
   return `<div class="pc${S.selPiece === p.id ? ' sel' : ''}" data-a="piece" data-id="${p.id}"><span class="nm">${esc(p.name)}</span><span class="num hint">${km(p.km || 0)} км</span>
     <span class="ctl"><span class="hint">день</span><input type="number" min="1" max="${maxDay + 30}" value="${p.day || ''}" data-c="pday" data-id="${p.id}" aria-label="День">
     <select data-c="prole" data-id="${p.id}" aria-label="Что это"><option value="main"${p.role === 'main' ? ' selected' : ''}>основная нитка</option><option value="radial"${p.role === 'radial' ? ' selected' : ''}>радиальный выход</option><option value="skip"${p.role === 'skip' ? ' selected' : ''}>не использовать</option><option value="alt">запасной вариант</option><option value="exit">аварийный выход</option></select>
-    <span class="sp" style="flex:1"></span><button class="icon-btn" data-a="pmove" data-id="${p.id}" data-d="-1" title="Раньше">${I.up}</button><button class="icon-btn" data-a="pmove" data-id="${p.id}" data-d="1" title="Позже">${I.down}</button></span>${radialCtl(p)}</div>`;
+    <span class="sp" style="flex:1"></span><button class="icon-btn" data-a="pmove" data-id="${p.id}" data-d="-1" title="Раньше">${I.up}</button><button class="icon-btn" data-a="pmove" data-id="${p.id}" data-d="1" title="Позже">${I.down}</button></span>${radialCtl(p)}
+    <span class="ctl pedit${p.edited ? ' has' : ''}"><button class="btn sm only-sel" data-a="editstart" data-id="${p.id}">✎ Править на карте</button>${p.undo ? `<button class="btn sm" data-a="pundo" data-id="${p.id}">↶ Отменить правку</button>` : ''}${p.edited ? `<button class="btn sm ghost" data-a="preset" data-id="${p.id}">Вернуть как было</button>` : ''}</span></div>`;
 }
 function stepDays() {
   const pr = P(); const M = daysModel(); const k = pr.meta.kcoef || 1;
@@ -1074,9 +1135,13 @@ function hintOff() { const h = $('.maphint'); h && h.remove(); const m = $('#map
 // Режимы карты: 'add' — поставить точку, 'cut' — разрезать нитку, 'band1'/'band2' — начало и конец участка
 function setMode(m, text) {
   S.mode = m; hintOff(); if (m !== 'band2') S.bandA = m === 'band1' ? null : S.bandA;
-  if (m !== 'draw') { S.drawPts = null; drawLayer && drawLayer.clearLayers(); }
+  if (m !== 'draw' && m !== 'redraw') { S.drawPts = null; S.drawSteps = null; drawLayer && drawLayer.clearLayers(); }
+  if (!['pick1', 'pick2', 'choose', 'redraw'].includes(m)) { editLayer && editLayer.clearLayers(); }
   if (!m) { S.bandA = null; if (S.mapTemp) { S.mapTemp = null; applyMapSize(); } return; }
-  const h = document.createElement('div'); h.className = 'maphint'; h.innerHTML = `${esc(text)} ${m === 'draw' ? '<button class="btn sm" data-a="drawundo" title="Убрать последнюю точку">↶</button><button class="btn sm go" data-a="drawdone">Готово</button>' : ''}<button class="icon-btn" data-a="modeoff" title="Отмена">${I.x}</button>`;
+  const route = `<button class="chip${S.routeOn ? ' on' : ''}" data-a="routetoggle" title="Путь между кликами — по тропам OpenStreetMap (сервис BRouter). Вне троп — прямая">по тропе</button>`;
+  const extra = m === 'draw' || m === 'redraw' ? `${route}<button class="btn sm" data-a="drawundo" title="Убрать последнюю точку">↶</button><button class="btn sm go" data-a="${m === 'redraw' ? 'redrawdone' : 'drawdone'}">Готово</button>`
+    : m === 'choose' ? '<button class="btn sm warn" data-a="editcut">Удалить — соединить прямой</button><button class="btn sm go" data-a="editredraw">Перерисовать</button>' : '';
+  const h = document.createElement('div'); h.className = 'maphint'; h.innerHTML = `${esc(text)} ${extra}<button class="icon-btn" data-a="modeoff" title="Отмена">${I.x}</button>`;
   $('.mapwrap').append(h); $('#map').style.cursor = 'crosshair';
   if (isPhone() && mapSize() !== 'big') { S.mapTemp = 'big'; applyMapSize(); }   // на телефоне для клика по карте она разворачивается сама
 }
@@ -1102,7 +1167,17 @@ async function mapClick(latlng) {
   if (!S.mode) return;
   if (S.mode === 'draw') {      // вариант кликами; рядом с ниткой точка прилипает к ней — так вариант стыкуется с маршрутом
     const n = nearestOnTrack(latlng); const q = n && n.piece && !VAR_ROLE(n.piece.role) ? [n.lat, n.lon] : [+latlng.lat.toFixed(6), +latlng.lng.toFixed(6)];
-    (S.drawPts = S.drawPts || []).push(q); drawPreview(); return;
+    return addDrawPoint(q);
+  }
+  if (S.mode === 'redraw') return addDrawPoint([+latlng.lat.toFixed(6), +latlng.lng.toFixed(6)]);
+  if (S.mode === 'choose') return;      // ждём выбора: удалить или перерисовать
+  if (S.mode === 'pick1' || S.mode === 'pick2') {
+    const p = pieceById(S.edit.piece), i = p && nearestIdx(p, latlng);
+    if (i == null) return toast('Нажми прямо на выбранный кусок нитки', true);
+    if (S.mode === 'pick1') { S.edit.i0 = i; showStretch(p, i, i); return setMode('pick2', 'Теперь нажми на нитку в конце участка'); }
+    S.edit.i1 = i; if (S.edit.i1 < S.edit.i0) [S.edit.i0, S.edit.i1] = [S.edit.i1, S.edit.i0];
+    if (S.edit.i1 - S.edit.i0 < 1) { S.mode = 'pick2'; return toast('Это одна и та же точка — нажми подальше', true); }
+    showStretch(p, S.edit.i0, S.edit.i1); return setMode('choose', 'Что сделать с выделенным участком?');
   }
   if (S.mode === 'add') {
     const obst = S.newType === 'pass'; S.newType = null;
@@ -1372,6 +1447,31 @@ A.dayrad = async el => {
   try { const r = await api('POST', `/api/projects/${S.pid}/day-radial`, { day: +el.dataset.d }, false, 'Склеиваю день в радиальный выход…'); S.proj = r.project; toast(r.msg, !r.ok); if (r.new) S.selPiece = r.new; paintPanel(); drawMap(); }
   catch (e) { fail(e); }
 };
+async function trackEdit(body, msg) {
+  await flush();
+  try { const r = await api('POST', `/api/projects/${S.pid}/track-edit`, body, false, msg || 'Правлю нитку…'); S.proj = r.project; toast(r.msg, !r.ok); S.tcKey = null; editLayer && editLayer.clearLayers(); paintPanel(); drawMap(); return r; }
+  catch (e) { fail(e); }
+}
+A.tcshow = el => { const f = (S.tc || [])[+el.dataset.i], p = f && pieceById(f.piece); if (p) showStretch(p, f.kind === 'gap' ? f.i0 : f.i0 - 1, f.kind === 'gap' ? f.i1 : f.i1 + 1, true); };
+A.tccut = el => { const f = (S.tc || [])[+el.dataset.i]; if (f) trackEdit({ piece: f.piece, action: 'cut', i0: f.i0, i1: f.i1 }, 'Вырезаю выброс…'); };
+A.tcdraw = el => { const f = (S.tc || [])[+el.dataset.i], p = f && pieceById(f.piece); if (!p) return; S.edit = { piece: p.id, i0: f.i0, i1: f.i1 }; S.drawPts = []; S.drawSteps = []; showStretch(p, f.i0, f.i1, true); setMode('redraw', 'Ставь точки пути, которым шли, — от начала разрыва к концу'); drawPreview(); };
+A.editstart = el => { S.edit = { piece: el.dataset.id }; setMode('pick1', 'Нажми на нитку в начале участка, который нужно поправить'); };
+A.editcut = () => { const e = S.edit; if (e.i1 - e.i0 < 2) { setMode(null); return toast('Между этими точками удалять нечего — они соседние', true); } setMode(null); trackEdit({ piece: e.piece, action: 'cut', i0: e.i0 + 1, i1: e.i1 - 1 }, 'Удаляю участок…'); };
+A.editredraw = () => { S.drawPts = []; S.drawSteps = []; setMode('redraw', 'Ставь точки нового пути кликами по карте'); drawPreview(); };
+A.redrawdone = async () => {
+  const e = S.edit, p = pieceById(e.piece);
+  if (S.routeOn && p && (S.drawPts || []).length) {      // по тропе — и последний отрезок до конца участка
+    const a = S.drawPts[S.drawPts.length - 1], b = p.pts[e.i1];
+    try { const r = await api('GET', `/api/projects/${S.pid}/route?a=${a[0]},${a[1]}&b=${b[0]},${b[1]}`, undefined, false, 'Ищу тропу…'); if (r.ok && r.pts.length > 2) S.drawPts.push(...r.pts.slice(1, -1)); } catch (err) { /* прямая */ }
+  }
+  const pts = S.drawPts || []; setMode(null);
+  await trackEdit({ piece: e.piece, action: 'redraw', i0: e.i0, i1: e.i1, pts }, 'Перерисовываю участок…');
+};
+A.routetoggle = el => { S.routeOn = !S.routeOn; el.classList.toggle('on', S.routeOn); toast(S.routeOn ? 'По тропе: путь между кликами проложит BRouter по тропам OpenStreetMap' : 'Прямыми отрезками'); };
+A.pundo = el => trackEdit({ piece: el.dataset.id, action: 'undo' }, 'Отменяю…');
+A.preset = el => trackEdit({ piece: el.dataset.id, action: 'reset' }, 'Возвращаю исходный трек…');
+A.gstep = el => { S.gstep = +el.dataset.v; paintPanel(); };
+A.gsplit = el => { S.gsplit = el.dataset.v; paintPanel(); };
 A.importas = el => { S.importAs = el.dataset.v; paintPanel(); };
 A.mkvars = el => { const ids = daysModel().loose.map(p => p.id); return varOp({ action: 'make', pieces: ids, kind: el.dataset.k }, 'Делаю варианты…'); };
 A.vkind = el => { const v = (P().variants || []).find(x => x.id === el.dataset.id); if (!v) return; v.kind = el.dataset.v; P().pieces.forEach(p => { if (p.var === v.id) p.role = v.kind; }); dirty(); paintPanel(); drawPieces(); };
@@ -1379,7 +1479,7 @@ A.vshow = el => { const ll = P().pieces.filter(p => p.var === el.dataset.id).fla
 A.vunmake = el => varOp({ action: 'unmake', var: el.dataset.id });
 A.vsplit = el => varOp({ action: 'split', piece: el.dataset.id });
 A.drawvar = el => { S.drawKind = el.dataset.k; S.drawPts = []; setMode('draw', `Ставь точки ${el.dataset.k === 'alt' ? 'запасного варианта' : 'аварийного выхода'} кликами по карте; у нитки точка прилипнет к ней`); };
-A.drawundo = () => { (S.drawPts || []).pop(); drawPreview(); };
+A.drawundo = () => { const n = (S.drawSteps || []).pop() || 1; (S.drawPts || []).splice(-n, n); drawPreview(); };
 A.drawdone = async () => {
   const pts = S.drawPts || []; if (pts.length < 2) return toast('Нужно хотя бы две точки', true);
   const kind = S.drawKind; setMode(null); await varOp({ action: 'draw', pts, kind }, 'Сохраняю вариант…');

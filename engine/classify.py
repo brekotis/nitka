@@ -333,6 +333,7 @@ def cut_piece(proj, pid, lat, lon):
     new = dict(p, id=uid(), name=base + ' (продолжение)', pts=second, km=round(length_km(second), 2), order=p.get('order', 0) + 0.5)
     p.update(name=base + ' (начало)' if not p['name'].endswith('(продолжение)') else p['name'], pts=first, km=round(length_km(first), 2))
     set_times(p, tf); set_times(new, ts2)
+    for x in (p, new): x.pop('orig', None); x.pop('hist', None)      # правки до разреза не отменяются по частям
     proj['pieces'].append(new)
     for n, x in enumerate(sorted(proj['pieces'], key=lambda x: x.get('order', 0))): x['order'] = n
     return dict(ok=True, new=new['id'], msg='Нитка разрезана: теперь это два куска. Поставь им дни, если нужно.')
