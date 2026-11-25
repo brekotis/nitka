@@ -272,6 +272,12 @@ table.sum { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 table.sum th { font: 700 12.5px var(--head); letter-spacing: .07em; text-transform: uppercase; color: var(--muted); text-align: left; padding: 6px 8px; border-bottom: var(--line); }
 table.sum td { padding: 6px 8px; border-bottom: 1px solid var(--sky-l); vertical-align: top; }
 table.sum td.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* сводка по дням: числа — узкими колонками сразу за датой, всё свободное место — препятствиям */
+table.sum:not(.adm) td:not(:last-child), table.sum:not(.adm) th:not(:last-child) { width: 1%; white-space: nowrap; }
+table.sum:not(.adm) th.n { text-align: right; }
+table.sum:not(.adm) .n { padding-left: 22px; }
+table.sum:not(.adm) td:last-child, table.sum:not(.adm) th:last-child { padding-left: 28px; min-width: 15em; }
+@media (max-width: 880px) { table.sum:not(.adm) .n { padding-left: 12px; } table.sum:not(.adm) td:last-child, table.sum:not(.adm) th:last-child { padding-left: 14px; } }
 .tblwrap { border: var(--line); border-radius: var(--r-s); background: var(--paper); overflow-x: auto; }
 .light { position: fixed; inset: 0; z-index: 3500; background: rgba(11, 42, 77, .93); display: grid; grid-template-rows: auto 1fr; animation: fade .15s; }
 .light header { display: flex; align-items: center; gap: 10px; padding: 10px 14px; color: #fff; }
