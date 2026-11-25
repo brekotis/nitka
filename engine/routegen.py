@@ -123,15 +123,16 @@ def diverse(found, C, k, must=()):
     return [p[0] for p in pick]
 
 
-def _leg(a, b, trail, kind):
-    """Отрезок по тропам с подходами по рельефу; без троп — весь по рельефу (не прямой через гребни)."""
-    key = (round(a[0], 5), round(a[1], 5), round(b[0], 5), round(b[1], 5), kind, trail)
+def _leg(a, b, trail, kind, avoid=()):
+    """Отрезок по тропам с подходами по рельефу; без троп — весь по рельефу (не прямой через гребни). avoid — запретные седловины."""
+    st = dist(a, b); avoid = tuple(x for x in avoid if dist((x[0], x[1]), a) + dist((x[0], x[1]), b) < st + 4000)
+    key = (round(a[0], 5), round(a[1], 5), round(b[0], 5), round(b[1], 5), kind, trail, avoid)
     with _RC_LOCK: hit = _RC.get(key)
     if hit: return hit
     if trail:
-        pts, ok, mode, _ = terrain.trail_leg(a, b, kind)
+        pts, ok, mode, _ = terrain.trail_leg(a, b, kind, avoid=avoid)
     else:
-        pts, info = terrain.path(a, b); ok, mode = True, 'terrain'
+        pts, info = terrain.path(a, b, avoid=avoid); ok, mode = True, 'terrain'
         if not pts: pts, mode = [[a[0], a[1]], [b[0], b[1]]], 'line'
     res = (pts, ok, mode)
     with _RC_LOCK:
@@ -141,11 +142,12 @@ def _leg(a, b, trail, kind):
 
 
 _TC = {}
-def _climb(a, b):
-    """Подъём от долины на седловину (или спуск) — по рельефу."""
-    key = (round(a[0], 5), round(a[1], 5), round(b[0], 5), round(b[1], 5))
+def _climb(a, b, avoid=()):
+    """Подъём от долины на седловину (или спуск) — по рельефу, в обход запретных седловин."""
+    avoid = tuple(x for x in avoid if dist((x[0], x[1]), a) + dist((x[0], x[1]), b) < dist(a, b) + 3000)
+    key = (round(a[0], 5), round(a[1], 5), round(b[0], 5), round(b[1], 5), avoid)
     if key in _TC: return _TC[key]
-    pts, _ = terrain.path(a, b)
+    pts, _ = terrain.path(a, b, avoid=avoid)
     res = (pts or [list(a), list(b)], True, 'terrain')
     if len(_TC) > 5000: _TC.clear()
     _TC[key] = res
@@ -161,7 +163,7 @@ def _near_idx(G, p, lim=220.0):
     return best[1] if best and best[0] <= lim else None
 
 
-def build(start, finish, chain, trail, kind, days, ex, sites=(), allp=(), quota=None):
+def build(start, finish, chain, trail, kind, days, ex, sites=(), allp=(), quota=None, forbid=()):
     """Цепочка перевалов → настоящий маршрут. К каждому перевалу — тропой до входной долины, по рельефу на седловину,
     вниз в другую долину. На готовой нитке распознаются перевалы «по пути» (она через них переваливает) и проверяется,
     что перевалы цепочки пройдены насквозь. → вариант с планом для планировщика."""
@@ -179,7 +181,10 @@ def build(start, finish, chain, trail, kind, days, ex, sites=(), allp=(), quota=
         if ins[i + 1] != b: part.append(('c', ins[i + 1], b))
         jobs.append(part)
     flat = [x for part in jobs for x in part]
-    res = list(ex.map(lambda x: _climb(x[1], x[2]) if x[0] == 'c' else _leg(x[1], x[2], trail, kind), flat))
+    # запретные седловины (категории, которых не просили, и «не через него»), кроме тех, что вплотную к выбранным точкам
+    keep_clear = [tuple(start), tuple(finish)] + [tuple(c['p']) for c in chain] + [tuple(c['sin']) for c in chain] + [tuple(c['sout']) for c in chain]
+    avoid = tuple((f['p'][0], f['p'][1], 300) for f in forbid if all(dist(f['p'], q) > 700 for q in keep_clear))
+    res = list(ex.map(lambda x: _climb(x[1], x[2], avoid) if x[0] == 'c' else _leg(x[1], x[2], trail, kind, avoid), flat))
     legs = []; it = iter(res)
     for part in jobs:
         pts, ok, mode = [], True, 'terrain'
@@ -213,6 +218,9 @@ def build(start, finish, chain, trail, kind, days, ex, sites=(), allp=(), quota=
         if i is None or not terrain.crosses(G, E, D, i): continue
         if any(abs(D[i] - D[x['i']]) < 800 for x in extra) or any(abs(D[i] - D[m]) < 800 for m in marks[1:-1]): continue      # одна седловина — один перевал
         extra.append(dict(c, i=i))
+    # перевалы категорий, которых не просили (или «не через него»), — вариант не годится, его не покажем
+    fids = {f['id'] for f in forbid}
+    banned = [x['name'] + (f' ({x["grade"]})' if x.get('grade') else '') for x in extra if x['id'] in fids]
     # квоты: перевалов какой категории вышло больше, чем просили
     over = []
     if quota:
@@ -267,14 +275,14 @@ def build(start, finish, chain, trail, kind, days, ex, sites=(), allp=(), quota=
     step = max(1, len(G) // 300)
     order = sorted([(m, dict(name=c['name'], grade=c['grade'], h=c['h'], note=c['note'], ref=c['id'], crossed=c['name'] not in uturn)) for c, m in zip(chain, marks[1:-1])] +
                    [(x['i'], dict(name=x['name'], grade=x['grade'], h=x['h'], note=x['note'], ref=x['id'], crossed=True, extra=True)) for x in extra], key=lambda x: x[0])
-    return dict(km=round(total / 1000, 1), up=int(up), dn=int(dn), nolink=nolink, legs=len(legs), uturn=uturn, over=over,
+    return dict(km=round(total / 1000, 1), up=int(up), dn=int(dn), nolink=nolink, legs=len(legs), uturn=uturn, over=over, banned=banned,
                 passes=[x[1] for x in order],
                 camps=[dict(h=int(E[i]), km=round(D[i] / 1000, 1), name=cname.get(i, '')) for i in camps],
                 line=[[round(q[0], 5), round(q[1], 5)] for q in G[::step]] + [[round(G[-1][0], 5), round(G[-1][1], 5)]],
                 plan=dict(pts=plan_pts, legs=plan_legs))
 
 
-def propose(start, finish, km, quota=None, days=None, trail=True, kind='', exclude=(), must=(), k=4, progress=None):
+def propose(start, finish, km, quota=None, days=None, trail=True, kind='', exclude=(), must=(), ban=(), k=4, progress=None):
     """quota — {категория: (от, до)}; must — перевалы, через которые маршрут идёт обязательно.
     progress(**поля) — ход работы для показа на карте: этап, кандидаты, перебираемые цепочки, готовые варианты. → {ok, variants | msg}."""
     rep = progress or (lambda **kw: None)
@@ -302,6 +310,8 @@ def propose(start, finish, km, quota=None, days=None, trail=True, kind='', exclu
         if c.get('is_summit'): continue
         it_ = _cat_item(c)
         if it_ and la0_ <= it_['p'][0] <= la1_ and lo0_ <= it_['p'][1] <= lo1_: allp.append(it_)
+    # нельзя: перевалы категорий, у которых «до» = 0 (их не просили), и отмеченные «не через него» — даже по пути
+    forbid = [it_ for it_ in allp if it_['id'] not in set(must) and (it_['id'] in set(ban) or (it_['grade'] in GRADES and quota.get(it_['grade'], (0, 0))[1] <= 0))]
     rep(stage=f'Перебираю цепочки из {len(C)} перевалов', pct=10)
     if far: return dict(ok=False, msg=f'{", ".join(f["name"] for f in far)} — слишком далеко для {int(km)} км от старта и финиша. Прибавь километров или убери его из обязательных.')
     if not C: return dict(ok=False, msg=f'В этом районе в пределах {int(km)} км нет перевалов нужных категорий из каталога. Попробуй другие категории, больше километров или сдвинь старт.')
@@ -316,7 +326,7 @@ def propose(start, finish, km, quota=None, days=None, trail=True, kind='', exclu
     C2 = [c for c in C if c['id'] not in (set(exclude) - set(must)) or c['id'] in set(must)]
     found, C = search(start, finish, budget, C, quota, must, set(exclude) - set(must), on_depth)
     if not found: return dict(ok=False, msg=f'Не сложилось ни одной цепочки на {int(km)} км с такими перевалами. Попробуй больше километров, меньше «от» или другие обязательные.' + (' Часть перевалов уже показана — «Ещё варианты» ищет только новые.' if exclude else ''))
-    picks = diverse(found, C, k + 2, must)
+    picks = diverse(found, C, k + 5, must); dropped = []
     sites = []
     if days and days > 1:      # стоянки из OpenStreetMap в охвате цепочек — ночёвки встанут на них, где получится
         rep(stage='Ищу стоянки и приюты по OpenStreetMap', pct=40)
@@ -335,9 +345,12 @@ def propose(start, finish, km, quota=None, days=None, trail=True, kind='', exclu
             trying = [list(start)] + [q for c in chain for q in ([c['sin'], c['p'], c['sout']] if c.get('sides') else [c['p']])] + [list(finish)]
             rep(stage=f'Прокладываю вариант {i + 1} из {len(picks)}: тропы, подходы и переходы через седловины', pct=40 + int(58 * i / len(picks)), sketch=[],
                 trying=[[round(q[0], 5), round(q[1], 5)] for q in trying])
-            try: v = build(start, finish, chain, trail, kind, days, ex, sites, allp, quota)
+            try: v = build(start, finish, chain, trail, kind, days, ex, sites, allp, quota, forbid)
             except RuntimeError: continue      # высоты не скачались — вариант пропускаем
+            if v['banned']: dropped.append(v['banned']); continue      # прошёл через перевал, которого не просили, — не показываем
             V.append(v); lines.append(v['line']); rep(built=list(lines))
+            if len(V) >= k + 1: break
+    if not V and dropped: return dict(ok=False, msg=f'Все найденные варианты проходят через перевалы, которых ты не просил ({", ".join(sorted({n for d in dropped for n in d})[:4])}), — обойти их тропами и по рельефу не вышло. Разреши эти категории, прибавь километров или сдвинь старт.')
     if not V: return dict(ok=False, msg='Не получилось посчитать варианты — высоты или тропы сейчас недоступны. Попробуй ещё раз через минуту.')
     V.sort(key=lambda v: abs(v['km'] * 1000 - target) / target + 0.15 * v['nolink'] / max(1, v['legs']) + 0.25 * len(v['over']) + 0.3 * len(v['uturn']))
     U = []

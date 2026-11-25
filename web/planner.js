@@ -346,7 +346,7 @@ export function createPlanner(ctx) {
     G.msg = ''; G.secs = 0;
     const quota = {}; GRADES.forEach(g => { const a = +G.quota[g][0] || 0, b = +G.quota[g][1] || 0; if (a || b) quota[g] = [a, Math.max(a, b)]; });
     const body = { start: G.start, finish: G.loop ? G.start : G.finish, km: +G.km, days: G.days ? +G.days : null, quota, trail: G.trail,
-      must: G.must.map(x => x.id), exclude: [...G.shown, ...G.ban.map(x => x.id)] };
+      must: G.must.map(x => x.id), ban: G.ban.map(x => x.id), exclude: [...G.shown, ...G.ban.map(x => x.id)] };
     G.prog = null; G.dimmed = false;
     try { G.job = (await api('POST', `/api/projects/${ctx.pid()}/route-gen`, body, false, false)).job; } catch (e) { G.msg = e.message; ctx.repaint(); return; }
     ctx.repaint();

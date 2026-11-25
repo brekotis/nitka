@@ -901,7 +901,7 @@ class H(BaseHTTPRequestHandler):
                     quota = {str(g): (int(v[0]), int(v[1])) for g, v in (d.get('quota') or {}).items()}
                     args = dict(start=tuple(st), finish=tuple(fi), km=max(3.0, min(400.0, float(d['km']))), quota=quota or None,
                                 days=int(d['days']) if d.get('days') else None, trail=d.get('trail', True) is not False, kind=proj['meta'].get('kind') or '',
-                                exclude=[str(x) for x in (d.get('exclude') or [])][:300], must=[str(x) for x in (d.get('must') or [])][:6])
+                                exclude=[str(x) for x in (d.get('exclude') or [])][:300], must=[str(x) for x in (d.get('must') or [])][:6], ban=[str(x) for x in (d.get('ban') or [])][:100])
                 except (KeyError, TypeError, ValueError): raise Err(400, 'Укажи старт, финиш и длину.')
                 if args['days'] is not None and not 1 <= args['days'] <= 40: args['days'] = None
                 with GEN_LOCK:

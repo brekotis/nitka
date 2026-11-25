@@ -305,10 +305,13 @@ def accept(proj, d):
     return dict(ok=True, msg='Отмечено: это не ошибка. Проверка больше не покажет это место.')
 
 
-def route(a, b, kind=''):
-    """Путь по тропам OpenStreetMap между двумя точками — через публичный BRouter (brouter.de). None — не получилось."""
+def route(a, b, kind='', nogos=()):
+    """Путь по тропам OpenStreetMap между двумя точками — через публичный BRouter (brouter.de). None — не получилось.
+    nogos — [(lat, lon, радиус м)]: места, через которые идти нельзя (седловины запрещённых перевалов)."""
     prof = 'trekking' if kind == 'вело' else 'hiking-mountain'
-    url = 'https://brouter.de/brouter?' + urllib.parse.urlencode(dict(lonlats=f'{a[1]:.6f},{a[0]:.6f}|{b[1]:.6f},{b[0]:.6f}', profile=prof, alternativeidx=0, format='geojson'))
+    q = dict(lonlats=f'{a[1]:.6f},{a[0]:.6f}|{b[1]:.6f},{b[0]:.6f}', profile=prof, alternativeidx=0, format='geojson')
+    if nogos: q['nogos'] = '|'.join(f'{lo:.6f},{la:.6f},{int(r)}' for la, lo, r in nogos)
+    url = 'https://brouter.de/brouter?' + urllib.parse.urlencode(q)
     try:
         with urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'nitka-hiking-report-maps/1.0'}), timeout=15) as r:
             g = json.loads(r.read().decode('utf-8'))

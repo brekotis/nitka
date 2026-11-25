@@ -39,8 +39,9 @@ def _simplify(pts, tol=12.0):
     return [pts[i] for i in sorted(set(keep))]
 
 
-def path(a, b, pad=0.35):
-    """Путь по рельефу от a до b ([lat, lon]) → (точки, {'km', 'maxdeg'}) или (None, None), если не вышло."""
+def path(a, b, pad=0.35, avoid=()):
+    """Путь по рельефу от a до b ([lat, lon]) → (точки, {'km', 'maxdeg'}) или (None, None), если не вышло.
+    avoid — [(lat, lon, радиус м)]: места, через которые идти нельзя (в 60 раз дороже)."""
     span = dist(a, b)
     if span < 60: return [list(a), list(b)], dict(km=round(span / 1000, 2), maxdeg=0)
     m = max(800.0, span * pad)      # запас вокруг: путь может обходить гребень
@@ -75,6 +76,12 @@ def path(a, b, pad=0.35):
         t = h / (v * 1000 / 3600)
         t = np.where(np.degrees(np.arctan(np.abs(s))) > STEEP, t * 25, t)
         cost.append(np.where(np.isnan(t), INF, t))
+    if avoid:      # запрещённые седловины — почти непроходимы
+        yy, xx = np.mgrid[0:H, 0:W]; mask = np.zeros((H, W), dtype=bool)
+        for la, lo, r in avoid:
+            px, py = _px(la, lo, z); cx, cy = px - gx - c0, py - gy - r0; rr = r / cell
+            if -rr <= cx <= W + rr and -rr <= cy <= H + rr: mask |= (xx - cx) ** 2 + (yy - cy) ** 2 <= rr * rr
+        if mask.any(): cost = [np.where(mask, t * 60, t) for t in cost]
     ra, ca = _px(a[0], a[1], z); rb, cb = _px(b[0], b[1], z)
     sa = (min(H - 1, max(0, int(ca - gy) - r0)), min(W - 1, max(0, int(ra - gx) - c0)))
     sb = (min(H - 1, max(0, int(cb - gy) - r0)), min(W - 1, max(0, int(rb - gx) - c0)))
@@ -158,26 +165,27 @@ def crosses(G, E, D, i, win=350.0, drop=80.0):
     return min(E[lo:i + 1] + [E[a]]) < top - drop and min(E[i:hi + 1] + [E[b]]) < top - drop and a < i < b
 
 
-def trail_leg(a, b, kind='', approach=250.0):
+def trail_leg(a, b, kind='', approach=250.0, avoid=()):
     """Отрезок по тропам (BRouter), а где тропа не доходит до точки — подход по рельефу (к перевалу от последней тропы).
     Тропы нет вовсе или BRouter уводит в обход через полрайона — весь отрезок по рельефу.
     → (точки, ok — нашлась ли тропа, 'trail' | 'terrain', maxdeg)"""
     from . import trackfix
     st = dist(a, b)
-    pts = trackfix.route(a, b, kind) if st < 40000 else None
+    near = [x for x in avoid if dist((x[0], x[1]), a) + dist((x[0], x[1]), b) < st + 4000][:40]      # только у этого отрезка
+    pts = trackfix.route(a, b, kind, near) if st < 40000 else None
     if pts and len(pts) > 1:
         L = sum(dist(p, q) for p, q in zip(pts, pts[1:]))
         if st > 1000 and L > 2.5 * st: pts = None
     if not pts:
-        tp, info = path(a, b)
+        tp, info = path(a, b, avoid=near)
         if tp: return tp, False, 'terrain', info['maxdeg']
         return [list(a), list(b)], False, 'line', max_slope([list(a), list(b)])
     out = [list(q) for q in pts]
     if dist(a, out[0]) > approach:
-        tp, _ = path(a, out[0]); out = (tp[:-1] if tp else [list(a)]) + out
+        tp, _ = path(a, out[0], avoid=near); out = (tp[:-1] if tp else [list(a)]) + out
     else: out[0] = list(a)
     if dist(out[-1], b) > approach:
-        tp, _ = path(out[-1], b); out = out + (tp[1:] if tp else [list(b)])
+        tp, _ = path(out[-1], b, avoid=near); out = out + (tp[1:] if tp else [list(b)])
     else: out[-1] = list(b)
     return out, True, 'trail', None
 
