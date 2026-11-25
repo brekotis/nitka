@@ -662,11 +662,23 @@ async function editor() {
   return ED;
 }
 let PLN = null;
+// Перерисовка панели планировщика. Пока кнопка мыши или палец прижаты, не перерисовываем: поле, потерявшее фокус при
+// нажатии на кнопку, шлёт «изменено», и если панель перерисовать в этот миг, кнопка подменится и нажатие пропадёт.
+let ptrAt = 0, planPending = false;
+const planPaintNow = () => { planPending = false; if (S.planner) paintPanel(); };
+document.addEventListener('pointerdown', () => { ptrAt = Date.now(); }, true);
+['pointerup', 'pointercancel'].forEach(t => document.addEventListener(t, () => setTimeout(() => { ptrAt = 0; if (planPending) planPaintNow(); }, 0), true));
+function planRepaint() {
+  if (ptrAt && Date.now() - ptrAt < 2000) { planPending = true; return; }      // отпустят — перерисуем (после щелчка)
+  const a = document.activeElement;
+  if (a && a.closest && a.closest('#panel') && a.matches('input,select')) { planPending = true; a.addEventListener('blur', () => setTimeout(() => { if (planPending && !ptrAt) planPaintNow(); }, 0), { once: true }); return; }
+  planPaintNow();
+}
 async function plannerMod() {
   if (PLN) return PLN;
   const m = await import(`./planner.js?v=${APPV}`);
   PLN = m.createPlanner({ L, getMap: () => map, api, toast, esc, confirmBox, sym, gcol: () => S.gcol || {}, pid: () => S.pid, proj: () => S.proj,
-    repaint: () => { const a = document.activeElement; if (a && a.closest && a.closest('#panel') && a.matches('input,select')) { a.addEventListener('blur', () => setTimeout(() => S.planner && paintPanel(), 0), { once: true }); return; } if (S.planner) paintPanel(); },
+    repaint: planRepaint,
     onDone: r => { S.proj = r.project; S.lastInfo = null; go(`#/p/${S.pid}/days`); setTimeout(() => drawMap(true), 50); },
     onClose: () => { S.planner = false; S.mode = null; hintOff(); if (S.mapTemp) { S.mapTemp = null; applyMapSize(); } paintEditor(); } });
   return PLN;
