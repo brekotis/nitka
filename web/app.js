@@ -665,14 +665,41 @@ let PLN = null;
 // Перерисовка панели планировщика. Пока кнопка мыши или палец прижаты, не перерисовываем: поле, потерявшее фокус при
 // нажатии на кнопку, шлёт «изменено», и если панель перерисовать в этот миг, кнопка подменится и нажатие пропадёт.
 let ptrAt = 0, planPending = false;
-const planPaintNow = () => { planPending = false; if (S.planner) paintPanel(); };
+// Перерисовка без дёрганья: новое содержимое панели сверяется со старым, и меняется только то, что изменилось.
+// Поле, в котором сейчас печатают, не трогаем; прокрутка, анимации и фокус остаются на месте.
+function morph(a, b) {
+  if (a.nodeType !== b.nodeType || a.nodeName !== b.nodeName) { if (!a.contains(document.activeElement)) a.replaceWith(b); return; }
+  if (a.nodeType === 3 || a.nodeType === 8) { if (a.data !== b.data) a.data = b.data; return; }
+  if (a.nodeType !== 1 || a.isEqualNode(b)) return;
+  const focused = a === document.activeElement;
+  for (const at of [...a.attributes]) if (!b.hasAttribute(at.name)) a.removeAttribute(at.name);
+  for (const at of [...b.attributes]) if (a.getAttribute(at.name) !== at.value) a.setAttribute(at.name, at.value);
+  morphKids(a, b);
+  if (!focused) {
+    if (a.nodeName === 'INPUT') { if (a.type === 'checkbox' || a.type === 'radio') a.checked = b.hasAttribute('checked'); else if (a.value !== (b.getAttribute('value') ?? '')) a.value = b.getAttribute('value') ?? ''; }
+    if (a.nodeName === 'SELECT') { const o = [...b.options].findIndex(x => x.hasAttribute('selected')); a.selectedIndex = o < 0 ? 0 : o; }
+  }
+}
+function morphKids(a, b) {
+  const ca = [...a.childNodes], cb = [...b.childNodes], n = Math.min(ca.length, cb.length);
+  for (let i = 0; i < n; i++) morph(ca[i], cb[i]);
+  for (let i = n; i < ca.length; i++) if (!ca[i].contains || !ca[i].contains(document.activeElement)) ca[i].remove();
+  for (let i = n; i < cb.length; i++) a.append(cb[i]);
+}
+const planPaintNow = () => {
+  planPending = false; if (!S.planner) return;
+  const el = $('#panel');
+  if (el && PLN && el.dataset.view === 'planner') {      // панель уже планировщика — только изменения
+    const t = document.createElement('section'); t.innerHTML = PLN.panel(); morphKids(el, t); setTimeout(updMore, 50); return;
+  }
+  paintPanel();
+};
 document.addEventListener('pointerdown', () => { ptrAt = Date.now(); }, true);
 ['pointerup', 'pointercancel'].forEach(t => document.addEventListener(t, () => setTimeout(() => { ptrAt = 0; if (planPending) planPaintNow(); }, 0), true));
 function planRepaint() {
   if (ptrAt && Date.now() - ptrAt < 2000) { planPending = true; return; }      // отпустят — перерисуем (после щелчка)
   const a = document.activeElement;
-  if (a && a.closest && a.closest('#panel') && a.matches('input,select')) { planPending = true; a.addEventListener('blur', () => setTimeout(() => { if (planPending && !ptrAt) planPaintNow(); }, 0), { once: true }); return; }
-  planPaintNow();
+  planPaintNow();      // поле с фокусом обновление не трогает (см. morph)
 }
 async function plannerMod() {
   if (PLN) return PLN;
@@ -876,6 +903,7 @@ function paintPanel(top) {
   el.className = S.step === 'maps' && !own ? 'build-host' : 'panel';
   el.style.cssText = S.step === 'maps' && !own ? 'overflow:hidden;min-height:0;display:block;height:100%' : '';
   el.innerHTML = S.role === 'view' ? viewerPanel() : S.planner && PLN ? PLN.panel() : S.hist ? historyPanel() : ({ tracks: stepTracks, days: stepDays, points: stepPoints, maps: stepMaps })[S.step]();
+  el.dataset.view = S.role === 'view' ? 'viewer' : S.planner && PLN ? 'planner' : S.hist ? 'history' : S.step;
   if (!top) { el.scrollTop = y; const o = $('.out'); if (o) o.scrollTop = y2; } else el.scrollTop = 0;
   if (S.step === 'tracks') bindDrop();
   markSteps();
