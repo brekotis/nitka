@@ -95,7 +95,7 @@ def unsign(tok):
 def card_of(proj):
     """Короткая карточка похода для списка: длина, дни, даты, силуэт нитки."""
     meta = proj.get('meta', {})
-    pcs = [p for p in proj.get('pieces', []) if p.get('role') != 'skip' and p.get('pts')]
+    pcs = [p for p in proj.get('pieces', []) if p.get('role') in ('main', 'radial') and p.get('pts')]
     lines = [p['pts'] for p in sorted(pcs, key=lambda p: (p.get('day') or 999, p.get('order', 0)))]
     km = sum(p.get('km') or 0 for p in pcs if p.get('role') == 'main' or meta.get('radial_one_way', True)) * float(meta.get('kcoef') or 1)
     days = sorted({p['day'] for p in pcs if p.get('day')})
@@ -158,7 +158,11 @@ def merge_client(stored, incoming):
         s = {k: v for k, v in s.items() if k not in ('shape', 'once')}
         if p.get('shape') in ('back', 'loop', 'lolli'): s['shape'] = p['shape']      # форма радиалки, выбранная вручную
         if isinstance(p.get('once'), bool): s['once'] = p['once']      # обратный путь этой радиалки: в одну сторону или нет (иначе — как во всём походе)
-        out.append(dict(s, name=str(p.get('name') or s['name'])[:120], day=day, role=p.get('role') if p.get('role') in ('main', 'radial', 'skip') else 'main',
+        role = p.get('role') if p.get('role') in ('main', 'radial', 'skip', 'alt', 'exit') else 'main'
+        s.pop('var', None)
+        if role in classify.VAR_ROLES:      # кусок варианта: без дня, привязан к варианту
+            day = None; s['var'] = str(p.get('var') or '')[:16]
+        out.append(dict(s, name=str(p.get('name') or s['name'])[:120], day=day, role=role,
                         order=p.get('order', s.get('order', 0))))
     pts = []
     for q in incoming.get('points', [])[:5000]:
@@ -194,7 +198,7 @@ def merge_client(stored, incoming):
         elif k == 'adjust' and isinstance(v, dict):
             adj = {}
             for sid, a in list(v.items())[:200]:
-                if not re.fullmatch(r'region|overview|work-\d{1,3}|day-\d{1,3}', str(sid)) or not isinstance(a, dict): continue
+                if not re.fullmatch(r'region|overview|scheme|work-\d{1,3}|day-\d{1,3}', str(sid)) or not isinstance(a, dict): continue
                 try:
                     o = {}
                     if a.get('lat') is not None and a.get('lon') is not None and -90 <= float(a['lat']) <= 90 and -180 <= float(a['lon']) <= 180:
@@ -220,7 +224,25 @@ def merge_client(stored, incoming):
         if not re.fullmatch(r'c_[0-9a-f]{4,12}', cid): cid = 'c_' + classify.uid()
         col = c.get('color') if re.fullmatch(r'#[0-9a-fA-F]{6}', str(c.get('color') or '')) else '#555555'
         cts.append(dict(id=cid, title=str(c.get('title') or 'Своя точка')[:60], letter=str(c.get('letter') or '•')[:2], color=col))
-    return dict(stored, meta=meta, pieces=out, points=pts, sheets=sheets, custom_types=cts, bands=bands)
+    # варианты маршрута: название, пояснение, тип; пустые (без кусков) отпадают, у осиротевших кусков — свой вариант
+    vs = []; known = {}
+    for v in (incoming.get('variants') if 'variants' in incoming else stored.get('variants')) or []:
+        try:
+            vid = str(v.get('id') or '')[:16]; kind = v.get('kind') if v.get('kind') in classify.VAR_ROLES else 'alt'
+            if not vid or vid in known: continue
+            known[vid] = dict(id=vid, kind=kind, title=str(v.get('title') or 'вариант')[:80], note=str(v.get('note') or '')[:300])
+        except AttributeError: continue
+    for p in out:
+        if p['role'] not in classify.VAR_ROLES: continue
+        v = known.get(p.get('var'))
+        if not v:
+            v = known[p['var']] = dict(id=p.get('var') or classify.uid(), kind=p['role'], title=classify.variant_title(p['name']), note='')
+            p['var'] = v['id']
+        p['role'] = v['kind']      # тип задаётся у варианта целиком
+    used = {p.get('var') for p in out if p['role'] in classify.VAR_ROLES}
+    vs = [v for v in known.values() if v['id'] in used]
+    if 'mode' in im and im['mode'] in ('plan', 'report', ''): meta['mode'] = im['mode'] or None
+    return dict(stored, meta=meta, pieces=out, points=pts, sheets=sheets, custom_types=cts, bands=bands, variants=vs)
 
 # ---------------------------------------------------------------- сборка в фоне
 JOBS = queue.Queue()
@@ -521,9 +543,49 @@ class H(BaseHTTPRequestHandler):
                     except importers.ImportError_ as e: raise Err(400, str(e))
                 if not any(L['segs'] or L['wpts'] for L in layers): raise Err(400, f'В «{name}» не нашлось ни треков, ни точек.')
                 if sum(len(s) for L in layers for s in L['segs']) > 1500000: raise Err(400, 'Слишком большой трек.')
-                info = classify.merge_import(proj, layers, name)
+                as_role = q.get('as') if q.get('as') in classify.VAR_ROLES else 'main'      # «Что загружаю»: основной маршрут или вариант
+                info = classify.merge_import(proj, layers, name, as_role)
                 save_project(pid, uid, proj)
                 return self.send(200, dict(project=for_client(proj), info=info))
+            if sub == 'variants' and m == 'POST':      # варианты маршрута: сделать из кусков, нарисовать, объединить, отделить
+                d = self.json(); act = d.get('action'); kind = d.get('kind') if d.get('kind') in classify.VAR_ROLES else 'alt'
+                pcs = {p['id']: p for p in proj.get('pieces', [])}
+                if act == 'make':
+                    ids = [str(x) for x in (d.get('pieces') or [])][:200]
+                    sel = sorted([pcs[i] for i in ids if i in pcs], key=lambda p: p.get('order', 0))
+                    if not sel: raise Err(400, 'Не выбраны куски нитки.')
+                    made = classify.group_variants(proj, sel, kind)
+                    msg = f"{'Запасной вариант' if kind == 'alt' else 'Аварийный выход'}" + (f' — {len(made)} шт.: куски не стыкуются друг с другом' if len(made) > 1 else ' готов')
+                elif act == 'draw':
+                    try: pts = [[round(float(a), 6), round(float(b), 6)] for a, b in (d.get('pts') or [])][:2000]
+                    except (TypeError, ValueError): raise Err(400, 'Неверные точки.')
+                    if len(pts) < 2: raise Err(400, 'Нужно хотя бы две точки.')
+                    p = dict(id=classify.uid(), src='drawn', name='нарисовано на карте', pts=pts, day=None, role=kind,
+                             order=len(proj['pieces']), km=round(classify.length_km(pts), 2))
+                    proj['pieces'].append(p)
+                    made = classify.group_variants(proj, [p], kind, title=str(d.get('title') or ('запасной вариант' if kind == 'alt' else 'аварийный выход'))[:80])
+                    msg = f"Нарисовано {p['km']:.1f} км".replace('.', ',')
+                elif act == 'split':
+                    p = pcs.get(str(d.get('piece') or ''))
+                    if not p or p.get('role') not in classify.VAR_ROLES: raise Err(400, 'Это не кусок варианта.')
+                    made = classify.group_variants(proj, [p], p['role'], title=classify.variant_title(p['name'])); msg = 'Кусок стал отдельным вариантом'
+                elif act == 'join':
+                    a, b = str(d.get('var') or ''), str(d.get('into') or '')
+                    vb = next((v for v in proj.get('variants', []) if v['id'] == b), None)
+                    if not vb or a == b: raise Err(400, 'Нет такого варианта.')
+                    for p in proj['pieces']:
+                        if p.get('var') == a: p['var'] = b; p['role'] = vb['kind']
+                    msg = 'Варианты объединены'
+                elif act == 'unmake':
+                    a = str(d.get('var') or '')
+                    for p in proj['pieces']:
+                        if p.get('var') == a: p['role'] = 'main'; p.pop('var', None)
+                    msg = 'Куски вернулись в нитку без дня'
+                else: raise Err(400, 'Неизвестное действие.')
+                used = {p.get('var') for p in proj['pieces'] if p.get('role') in classify.VAR_ROLES}
+                proj['variants'] = [v for v in proj.get('variants', []) if v['id'] in used]
+                save_project(pid, uid, proj)
+                return self.send(200, dict(project=for_client(proj), msg=msg))
             if sub == 'source-delete' and m == 'POST':
                 classify.remove_source(proj, str(self.json().get('id') or '')); save_project(pid, uid, proj)
                 return self.send(200, dict(project=for_client(proj)))
@@ -551,7 +613,7 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, dict(project=for_client(proj), **r))
             if sub == 'build' and m == 'POST':
                 d = self.json()
-                if not any(p.get('role') != 'skip' for p in proj.get('pieces', [])): raise Err(400, 'Сначала загрузите трек.')
+                if not any(p.get('role') in ('main', 'radial') for p in proj.get('pieces', [])): raise Err(400, 'Сначала загрузите трек основного маршрута.')
                 only = [s for s in (d.get('only') or []) if re.fullmatch(r'[a-z]+(-\d+)?', str(s))] or None
                 mine = {r['id'] for r in db().execute('SELECT id FROM projects WHERE user_id=?', (uid,))}
                 if sum(1 for x in list(ACTIVE) if x in mine) >= 3: raise Err(429, 'Уже собираются три твоих похода — дождись, пока закончат.')

@@ -389,8 +389,77 @@ const startDate = () => P().meta.start_date ? new Date(P().meta.start_date + 'T0
 function dateOf(n) { const s = startDate(); if (!s) return null; const d = new Date(s); d.setDate(s.getDate() + n - 1); return d; }
 const dm = d => d ? String(d.getDate()).padStart(2, '0') + '.' + String(d.getMonth() + 1).padStart(2, '0') : '';
 const wd = d => d ? ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'][d.getDay()] : '';
+// ---------------------------------------------------------------- варианты маршрута: запасные и аварийные выходы
+// План или отчёт: выбрано вручную или по дате (поход ещё впереди — план)
+const isPlan = () => { const m = P().meta.mode; if (m === 'plan' || m === 'report') return m === 'plan'; const d = P().meta.start_date; return !!d && new Date(d) > new Date(); };
+const VAR_ROLE = r => r === 'alt' || r === 'exit';
+const VKIND = { alt: 'запасной вариант', exit: 'аварийный выход' };
+const varKind = n => { n = (n || '').toLowerCase(); if (/аварийн|авар\.|эвакуац|(^|[^а-яё])сход($|[^а-яё])|аварийк/.test(n)) return 'exit'; if (/запасн|альтернат|вариант|варинат|обход/.test(n) && !/основн/.test(n)) return 'alt'; return null; };
+const gdist = (a, b) => { const k = Math.cos(a[0] * Math.PI / 180); return Math.hypot((b[1] - a[1]) * k * 111320, (b[0] - a[0]) * 110540); };
+// Варианты с кусками, номером по ходу маршрута (З1, А1…) и тем, откуда и куда ведут (день — по ближайшей точке нитки, до 1 км)
+function varList() {
+  const pr = P(), k = pr.meta.kcoef || 1;
+  const vs = (pr.variants || []).map(v => ({ ...v, pieces: pr.pieces.filter(p => p.var === v.id && VAR_ROLE(p.role)).sort((a, b) => a.order - b.order) })).filter(v => v.pieces.length);
+  if (!vs.length) return vs;
+  // порядок точек — как у сервера (model.day_lines): в каждом дне сначала основная нитка, потом радиалки
+  const mains = pr.pieces.filter(p => (p.role === 'main' || p.role === 'radial') && p.day).sort((a, b) => a.day - b.day || (a.role === 'radial') - (b.role === 'radial') || a.order - b.order);
+  const near = pt => { let best = null, i = 0; for (const p of mains) for (const q of p.pts) { const d = gdist(pt, q); if (!best || d < best.d) best = { d, day: p.day, i }; i++; } return best && best.d < 1000 ? best : null; };
+  for (const v of vs) {
+    const a = v.pieces[0].pts[0], e = v.pieces[v.pieces.length - 1].pts.slice(-1)[0], fa = near(a), fe = near(e);
+    v.from = fa && fa.day; v.to = fe && fe.day; v.pos = fa ? fa.i : 1e9; v.km = v.pieces.reduce((s, p) => s + (p.km || 0), 0) * k;
+    // как в сводке (engine/model.py, var_route): «от дня 9 до дня 11», «от дня 7 → Кировск»
+    const joins = fe && fe.d < 300, tgt = pr.points.filter(q => ['town', 'transport', 'exit', 'house'].includes(q.type)).map(q => ({ q, d: gdist(e, [q.lat, q.lon]) })).sort((x, y) => x.d - y.d)[0];
+    const target = tgt && tgt.d < 3000 ? (tgt.q.name || '').trim() : '', a0 = v.from ? `от дня ${v.from}` : 'отдельно от нитки';
+    if (v.kind === 'exit' || !joins) { const b = target || (joins && v.to ? `к нитке, день ${v.to}` : ''); v.route = b ? `${a0} → ${b}` : a0; }
+    else v.route = v.to && v.to !== v.from ? `${a0} до дня ${v.to}` : v.from ? `день ${v.from}` : a0;
+  }
+  for (const kind of ['alt', 'exit']) vs.filter(v => v.kind === kind).sort((a, b) => a.pos - b.pos).forEach((v, i) => { v.num = i + 1; v.lab = (kind === 'alt' ? 'З' : 'А') + (i + 1); });
+  return vs.sort((a, b) => (a.kind !== b.kind ? (a.kind === 'alt' ? -1 : 1) : a.num - b.num));
+}
+function varCard(v, all) {
+  const others = all.filter(o => o.id !== v.id);
+  return `<div class="vcard ${v.kind}" id="v-${v.id}">
+    <div class="vhead"><span class="vbadge ${v.kind}">${v.lab}</span><input type="text" data-c="vtitle" data-id="${v.id}" value="${esc(v.title || '')}" maxlength="80" aria-label="Название варианта"></div>
+    <div class="hint">${esc(v.route)} · ${km(v.km)} км${v.pieces.length > 1 ? ` · ${v.pieces.length} ${plural(v.pieces.length, 'кусок', 'куска', 'кусков')}` : ''}</div>
+    <input type="text" data-c="vnote" data-id="${v.id}" value="${esc(v.note || '')}" maxlength="300" placeholder="${v.kind === 'alt' ? 'Зачем: например, при лавинной опасности на перевале' : 'Куда и когда: например, сход в Кировск при травме'}" aria-label="Пояснение">
+    <div class="chips"><span class="seg sm"><button class="${v.kind === 'alt' ? 'on' : ''}" data-a="vkind" data-id="${v.id}" data-v="alt">Запасной</button><button class="${v.kind === 'exit' ? 'on' : ''}" data-a="vkind" data-id="${v.id}" data-v="exit">Аварийный</button></span>
+      <button class="btn sm" data-a="vshow" data-id="${v.id}">На карте</button>
+      ${others.length ? `<select data-c="vjoin" data-id="${v.id}" aria-label="Объединить с другим вариантом"><option value="">Объединить с…</option>${others.map(o => `<option value="${o.id}">${o.lab} · ${esc((o.title || '').slice(0, 40))}</option>`).join('')}</select>` : ''}
+      <button class="btn sm ghost" data-a="vunmake" data-id="${v.id}" title="Куски вернутся в нитку без дня">Это не вариант</button></div>
+    ${v.pieces.length > 1 ? `<div class="vpcs">${v.pieces.map(p => `<div><span>${esc(p.name)} · ${km(p.km || 0)} км</span><button class="btn sm ghost" data-a="vsplit" data-id="${p.id}">Отделить</button></div>`).join('')}</div>` : ''}
+  </div>`;
+}
+function varsBlock() {
+  const vs = varList();
+  return `<div class="sec vars" id="vars"><h3>Запасные варианты и аварийные выходы${vs.length ? ` <small>${vs.length}</small>` : ''}</h3>
+    <p class="hint">В километраж и профиль маршрута не входят — у них своя строка в сводке. На картах запасной — синий пунктир, аварийный — чёрно-красный.</p>
+    ${vs.map(v => varCard(v, vs)).join('')}
+    <div class="chips"><button class="btn sm" data-a="drawvar" data-k="alt">✎ Нарисовать запасной</button><button class="btn sm" data-a="drawvar" data-k="exit">✎ Нарисовать аварийный</button></div>
+    ${!vs.length ? '<div class="hint">Отдельный трек варианта можно загрузить на шаге «Треки», выбрав «Что загружаю: запасной вариант» — или отметить кусок без дня как вариант.</div>' : ''}</div>`;
+}
+// куски без дня, похожие по названию на варианты, — в варианты (запасные и аварийные по словам в названии)
+async function mkVarsAuto(ids) {
+  const by = { alt: [], exit: [] }; ids.forEach(id => { const p = pieceById(id); if (p && varKind(p.name)) by[varKind(p.name)].push(id); });
+  for (const k of ['alt', 'exit']) if (by[k].length) await varOp({ action: 'make', pieces: by[k], kind: k }, 'Делаю варианты…');
+  if (S.step !== 'days') go(`#/p/${S.pid}/days`);
+  setTimeout(() => { const c = $('#vars'); c && c.scrollIntoView({ block: 'start', behavior: 'smooth' }); }, 400);
+}
+async function varOp(body, msg) {
+  await flush();
+  try { const r = await api('POST', `/api/projects/${S.pid}/variants`, body, false, msg || 'Секунду…'); S.proj = r.project; toast(r.msg); paintPanel(); drawPieces(); return r; }
+  catch (e) { fail(e); }
+}
+let drawLayer = null;
+function drawPreview() {
+  if (!map) return; if (!drawLayer) drawLayer = L.layerGroup().addTo(map); drawLayer.clearLayers();
+  const pts = S.drawPts || []; if (!pts.length) return;
+  const col = S.drawKind === 'exit' ? '#111827' : '#1F6FD1';
+  L.polyline(pts, { color: '#fff', weight: 7, opacity: .9, interactive: false }).addTo(drawLayer);
+  L.polyline(pts, { color: col, weight: 4, dashArray: '9 6', interactive: false }).addTo(drawLayer);
+  pts.forEach(q => L.circleMarker(q, { radius: 4, color: col, weight: 2, fillColor: '#fff', fillOpacity: 1, interactive: false }).addTo(drawLayer));
+}
 function daysModel() {
-  const used = P().pieces.filter(p => p.role !== 'skip').sort((a, b) => a.order - b.order);
+  const used = P().pieces.filter(p => p.role === 'main' || p.role === 'radial').sort((a, b) => a.order - b.order);
   const max = Math.max(0, ...used.map(p => p.day || 0));
   const days = []; for (let n = 1; n <= max; n++) days.push({ n, pieces: used.filter(p => p.day === n) });
   return { days, loose: used.filter(p => !p.day), skipped: P().pieces.filter(p => p.role === 'skip'), max };
@@ -492,12 +561,17 @@ function infoText(i) {
   let other = 0;
   for (const [t, n] of Object.entries(i.points || {})) { if (t === 'skip') continue; if (names[t]) parts.push(`${n} ${plural(n, ...names[t])}`); else other += n; }
   if (other) parts.push(`ещё ${other} ${plural(other, 'точка', 'точки', 'точек')}`);
+  const va = (i.variants || []).filter(v => v.kind === 'alt').length, ve = (i.variants || []).filter(v => v.kind === 'exit').length;
+  if (va) parts.push(`${va} ${plural(va, 'запасной вариант', 'запасных варианта', 'запасных вариантов')}`);
+  if (ve) parts.push(`${ve} ${plural(ve, 'аварийный выход', 'аварийных выхода', 'аварийных выходов')}`);
   return parts.join(', ');
 }
 function stepTracks() {
   const pr = P(); const has = pr.pieces.length > 0; const i = S.lastInfo;
   return `<h2>Треки</h2><p>Загрузи нитку маршрута — одним файлом, по дням или ссылкой. Ночёвки, перевалы и другие точки подтянутся вместе с ней.</p>
     ${i ? `<div class="banner ok"><div><b>Нашёл:</b> ${esc(infoText(i))}.</div><div class="hint">${i.assigned === i.pieces - i.skipped ? 'Все треки разложились по дням сами.' : (i.unassigned ? `По дням не разложились: ${i.unassigned}. Это правится на шаге «Дни».` : '')}${i.skipped ? ` Дубли (${i.skipped}) отложены в сторону.` : ''}</div></div>` : ''}
+    <div class="field"><span>Что загружаю</span><div class="seg sm">${[['main', 'Основной маршрут'], ['alt', 'Запасной вариант'], ['exit', 'Аварийный выход']].map(([v, t]) => `<button class="${(S.importAs || 'main') === v ? 'on' : ''}" data-a="importas" data-v="${v}">${t}</button>`).join('')}</div>
+      <div class="hint">${(S.importAs || 'main') === 'main' ? 'Запасные и аварийные треки «Нитка» узнаёт и сама — по словам «запасной», «вариант», «обход», «аварийный», «сход» в названии.' : `Всё из следующей загрузки станет ${S.importAs === 'alt' ? 'запасным вариантом' : 'аварийным выходом'} — файл или ссылка nakarte.`}</div></div>
     <label class="drop" id="drop">${I.upload}<b>Перетащи файлы сюда</b><span>GPX, KML, KMZ, GeoJSON или ZIP с ними — или нажми, чтобы выбрать</span><input id="file" type="file" multiple hidden accept=".gpx,.kml,.kmz,.geojson,.json,.zip,.nktk"></label>
     <form class="linkrow" id="linkf"><input type="url" name="link" placeholder="…или вставь ссылку nakarte.me с треком" autocomplete="off"><button class="btn">Добавить</button></form>
     <details class="help" open><summary>Как назвать треки и точки, чтобы всё разложилось само</summary><div class="in">
@@ -516,7 +590,7 @@ function bindDrop() {
   ['dragleave', 'drop'].forEach(n => d.addEventListener(n, e => { e.preventDefault(); d.classList.remove('over'); }));
   d.addEventListener('drop', e => upload([...e.dataTransfer.files]));
   $('#linkf').onsubmit = async e => { e.preventDefault(); const v = e.target.link.value.trim(); if (!v) return; S.lastInfo = null;
-    if (await importOne(() => api('POST', `/api/projects/${S.pid}/import`, { link: v }, false, 'Скачиваю трек с nakarte.me и разбираю его…'))) { toast('Трек по ссылке загружен'); paintPanel(true); drawMap(true); } };
+    if (await importOne(() => api('POST', `/api/projects/${S.pid}/import${S.importAs && S.importAs !== 'main' ? '?as=' + S.importAs : ''}`, { link: v }, false, 'Скачиваю трек с nakarte.me и разбираю его…'))) { toast('Трек по ссылке загружен'); paintPanel(true); drawMap(true); } };
 }
 async function importOne(call) {
   await flush(); const d = $('#drop'); d && d.classList.add('busy');
@@ -532,7 +606,7 @@ async function upload(files) {
   files.sort((a, b) => a.name.localeCompare(b.name, 'ru', { numeric: true }));
   for (const [i, f] of files.entries()) {
     const msg = `Читаю «${f.name}»${files.length > 1 ? ` — ${i + 1} из ${files.length}` : ''}${f.size > 3e6 ? ' (файл большой, это может занять полминуты)' : ''}…`;
-    if (await importOne(() => api('POST', `/api/projects/${S.pid}/import?name=${encodeURIComponent(f.name)}`, f, true, msg))) ok++;
+    if (await importOne(() => api('POST', `/api/projects/${S.pid}/import?name=${encodeURIComponent(f.name)}${S.importAs && S.importAs !== 'main' ? '&as=' + S.importAs : ''}`, f, true, msg))) ok++;
   }
   if (ok) { toast(ok > 1 ? `Загружено файлов: ${ok}` : 'Трек загружен'); paintPanel(true); drawMap(true); }
 }
@@ -541,7 +615,7 @@ async function upload(files) {
 function pieceRow(p, maxDay) {
   return `<div class="pc${S.selPiece === p.id ? ' sel' : ''}" data-a="piece" data-id="${p.id}"><span class="nm">${esc(p.name)}</span><span class="num hint">${km(p.km || 0)} км</span>
     <span class="ctl"><span class="hint">день</span><input type="number" min="1" max="${maxDay + 30}" value="${p.day || ''}" data-c="pday" data-id="${p.id}" aria-label="День">
-    <select data-c="prole" data-id="${p.id}" aria-label="Что это"><option value="main"${p.role === 'main' ? ' selected' : ''}>основная нитка</option><option value="radial"${p.role === 'radial' ? ' selected' : ''}>радиальный выход</option><option value="skip"${p.role === 'skip' ? ' selected' : ''}>не использовать</option></select>
+    <select data-c="prole" data-id="${p.id}" aria-label="Что это"><option value="main"${p.role === 'main' ? ' selected' : ''}>основная нитка</option><option value="radial"${p.role === 'radial' ? ' selected' : ''}>радиальный выход</option><option value="skip"${p.role === 'skip' ? ' selected' : ''}>не использовать</option><option value="alt">запасной вариант</option><option value="exit">аварийный выход</option></select>
     <span class="sp" style="flex:1"></span><button class="icon-btn" data-a="pmove" data-id="${p.id}" data-d="-1" title="Раньше">${I.up}</button><button class="icon-btn" data-a="pmove" data-id="${p.id}" data-d="1" title="Позже">${I.down}</button></span>${radialCtl(p)}</div>`;
 }
 function stepDays() {
@@ -562,12 +636,16 @@ function stepDays() {
       <div class="chips"><button class="btn sm go" data-a="shiftdays" data-n="${f.n - 1}">Сделать день ${f.n} первым</button></div></div>` : ''; })()}
     ${single ? `<div class="banner"><div><b>Трек не разбит по дням.</b> Так тоже можно — получится один общий день. Если поход многодневный, отметь ночёвки с датами (шаг «Точки») и разрежь нитку по ним.</div>
       <div class="chips"><button class="btn sm" data-a="split-camps">Разрезать по ночёвкам</button><button class="btn sm" data-a="each-day">Каждый кусок — свой день</button></div></div>` : ''}
+    ${(() => { const vc = M.loose.filter(p => varKind(p.name)); return vc.length ? `<div class="banner"><div><b>Похоже, ${vc.length > 1 ? 'это запасные варианты или аварийные выходы' : 'это вариант маршрута'}:</b> ${esc([...new Set(vc.map(p => p.name.replace(/\s*·\s*часть\s*\d+$/, '')))].join(', '))}. Варианты не входят в дни и километраж, на картах рисуются своим цветом.</div>
+      <div class="chips"><button class="btn sm go" data-a="mkvarauto">Сделать ${vc.length > 1 ? 'вариантами' : 'вариантом'}</button></div></div>` : ''; })()}
     ${M.loose.length && !single ? `<div class="day loose"><header>Без дня <small>${M.loose.length} ${plural(M.loose.length, 'кусок', 'куска', 'кусков')} — впиши номер дня</small></header>${M.loose.map(p => pieceRow(p, M.max)).join('')}
-      <div class="pc" style="cursor:default"><span class="ctl"><button class="btn sm" data-a="split-camps">Разрезать по ночёвкам</button><button class="btn sm" data-a="each-day">Каждый — свой день</button></span></div></div>` : ''}
+      <div class="pc" style="cursor:default"><span class="ctl"><button class="btn sm" data-a="split-camps">Разрезать по ночёвкам</button><button class="btn sm" data-a="each-day">Каждый — свой день</button></span>
+        <span class="ctl"><span class="hint">или это варианты:</span><button class="btn sm" data-a="mkvars" data-k="alt">Все — запасные</button><button class="btn sm" data-a="mkvars" data-k="exit">Все — аварийные</button></span></div></div>` : ''}
     ${single ? `<div class="day"><header>День 1 <small>${km(dayKm(M.loose))} км</small></header>${M.loose.map(p => pieceRow(p, 1)).join('')}</div>` : ''}
     ${M.days.map(d => { const dt = dateOf(d.n);
       if (!d.pieces.length) return `<div class="day rest"><header>День ${d.n}${dt ? ' · ' + dm(dt) : ''} <small>днёвка — трека нет</small></header></div>`;
       return `<div class="day${d.n % 2 ? '' : ' even'}"><header>День ${d.n}${dt ? ` · ${dm(dt)}, ${wd(dt)}` : ''} <small class="num">≈ ${km(dayKm(d.pieces))} км</small></header>${d.pieces.map(p => pieceRow(p, M.max)).join('')}</div>`; }).join('')}
+    ${varsBlock()}
     ${M.skipped.length ? `<details class="day skip"><summary style="list-style:none;cursor:pointer"><header>Не используются <small>${M.skipped.length} · нажми, чтобы показать</small></header></summary>${M.skipped.map(p => pieceRow(p, M.max)).join('')}</details>` : ''}
     <div class="next"><button class="btn" data-a="step" data-step="tracks">← Треки</button><button class="btn go" data-a="step" data-step="points">Дальше: точки →</button></div>`;
 }
@@ -656,6 +734,8 @@ function todos() {
   const y0 = pr.meta.start_date ? +pr.meta.start_date.slice(0, 4) : 0;
   const yb = y0 ? pts.filter(q => q.type === 'camp' && q.date && Math.abs(+q.date.slice(0, 4) - y0) > 1) : [];
   if (yb.length) out.unshift({ step: 'points', tab: 'points', fix: 'campyear', text: `У ${yb.length > 1 ? yb.length + ' ночёвок' : 'ночёвки'} дата ${yb[0].date.slice(8, 10)}.${yb[0].date.slice(5, 7)}.${yb[0].date.slice(0, 4)} — похоже, опечатка в годе: из-за неё ночёвки пронумерованы не по порядку`, btn: `Исправить на ${y0}` });
+  const vc = M.loose.filter(p => varKind(p.name));
+  if (vc.length) out.unshift({ step: 'days', fix: 'mkvar', ids: vc.map(p => p.id), text: `${vc.length} ${plural(vc.length, 'кусок', 'куска', 'кусков')} без дня ${plural(vc.length, 'похож', 'похожи', 'похожи')} на запасные варианты или аварийные выходы — например, «${vc[0].name}»`, btn: 'Сделать вариантами' });
   const g = pts.filter(q => q.guess && q.type !== 'skip').length;
   if (g) out.push({ step: 'points', tab: 'points', filter: 'guess', text: `${g} ${plural(g, 'точка', 'точки', 'точек')}: тип угадан неуверенно`, btn: 'Проверить' });
   out.forEach((t, i) => { t.i = i; });
@@ -845,6 +925,8 @@ function stepMaps() {
       <label class="field"><span>Район — для заголовков карт</span><input type="text" data-c="area" value="${esc(pr.meta.area || '')}" maxlength="80" placeholder="например: Сванетия, Центральный Кавказ"></label>
       <div class="sec"><h3>Листы</h3>${SHEET_OPTS.map(([id, t, s]) => `<label class="switch"><input type="checkbox" data-c="sheet" data-f="${id}" ${sh[id] !== false ? 'checked' : ''}><span><b>${t}</b><div class="hint">${s}</div></span></label>`).join('')}</div>
       ${workScaleField(sh)}
+      <div class="field"><span>Это план или отчёт</span><div class="chips">${[['plan', 'План похода'], ['report', 'Отчёт о походе']].map(([v, t]) => `<button class="chip${(isPlan() ? 'plan' : 'report') === v ? ' on' : ''}" data-a="pmode" data-v="${v}">${t}</button>`).join('')}</div>
+        <div class="hint">${isPlan() ? 'На картах: «нитка — планируемый маршрут», сводка — «график движения (план)».' : 'На картах: «нитка — трек группы».'}${pr.meta.mode ? '' : ' Выбрано по дате похода.'}</div></div>
       <div class="field"><span>Основа</span><div class="chips">${[['otm', 'OpenTopoMap'], ['gsh', 'Генштаб и ГГЦ, где есть']].map(([v, t]) => `<button class="chip${(sh.base || 'otm') === v ? ' on' : ''}" data-a="sbase" data-v="${v}">${t}</button>`).join('')}</div>
         <div class="hint">OpenTopoMap есть везде. Генштаб подробнее в горах, но покрывает не всё — где его нет, подставится OpenTopoMap.</div></div>
       ${pr.points.some(q => q.type === 'photo') ? `<label class="switch"><input type="checkbox" data-c="sheet" data-f="photos" ${sh.photos !== false ? 'checked' : ''}>Фототочки на картах дней и рабочих листах</label>` : ''}
@@ -871,11 +953,15 @@ function stepMaps() {
           <div class="cap"><b>${esc(s.title)}</b><div class="s">${km(s.w_cm)} × ${km(s.h_cm)} см${s.note ? ' · ' + esc(s.note) : ''}</div>
           <div class="dl"><a href="/files/${S.pid}/${s.file}?dl=1" data-stop>PNG</a><a href="/files/${S.pid}/${s.file.replace('.png', '.jpg')}?dl=1" data-stop>JPG</a>${s.frame ? `<a href="#" data-stop data-a="frame" data-i="${i}" title="Сдвинуть рамку или поменять масштаб этого листа">Рамка</a>` : ''}</div></div></div>`
         : `<div class="sheet ${s.state === 'run' ? 'run' : ''}"><div class="pic"><div class="wait">${s.state === 'run' ? 'рисую' : s.state === 'err' ? 'ошибка' : 'ждёт'}</div></div><div class="cap"><b>${esc(s.title)}</b><div class="s">${s.state === 'err' ? esc(s.error || '') : '&nbsp;'}</div></div></div>`).join('')}</div>
-      ${sm && sm.days ? `<div class="sec"><h3>Сводка по дням <span class="hint" style="text-transform:none;letter-spacing:0;font:400 13.5px var(--body)">— для графика движения</span></h3>
+      ${sm && sm.days ? `<div class="sec"><h3>${isPlan() ? 'График движения (план)' : 'Сводка по дням'} <span class="hint" style="text-transform:none;letter-spacing:0;font:400 13.5px var(--body)">— ${isPlan() ? 'для заявки' : 'для графика движения'}</span></h3>
         <div class="tblwrap"><table class="sum"><thead><tr><th>День</th><th>Дата</th><th class="n">Км</th><th class="n">Набор</th><th class="n">Сброс</th><th class="n">Высоты, м</th><th class="obj">${sm.days.some(d => (d.key_objects || []).length) ? 'Определяющие препятствия' : 'Препятствия'}</th></tr></thead><tbody>
         ${sm.days.map(d => `<tr><td>${d.n}</td><td>${d.date}</td><td class="n">${km(d.km)}</td><td class="n">+${d.up}</td><td class="n">−${d.dn}</td><td class="n">${d.zmin}–${d.zmax}</td><td>${esc(((d.key_objects || []).length ? d.key_objects : d.objects).join('; '))}</td></tr>`).join('')}
         <tr><td colspan="2"><b>Всего</b></td><td class="n"><b>${km(sm.km)}</b></td><td class="n"><b>+${sm.up}</b></td><td class="n"><b>−${sm.dn}</b></td><td></td><td class="hint">${sm.kcoef !== 1 ? `км с коэффициентом ${km(sm.kcoef)}; ` : ''}высоты — ${sm.elev === 'track' ? 'из трека' : 'по модели рельефа'}</td></tr></tbody></table></div>
         ${sm.camps.length ? `<div class="hint"><b>Ночёвки:</b> ${sm.camps.map(c => `${c.lab} — ${[c.date, c.name, c.h + ' м'].filter(Boolean).map(esc).join(', ')}`).join('; ')}</div>` : ''}</div>` : ''}
+      ${sm && sm.variants && sm.variants.length ? `<div class="sec"><h3>Запасные варианты и аварийные выходы</h3>
+        <div class="tblwrap"><table class="sum vtbl"><thead><tr><th>№</th><th>Вариант</th><th>Откуда — куда</th><th class="n">Км</th><th class="n">Набор</th><th class="n">Сброс</th><th>Препятствия</th></tr></thead><tbody>
+        ${sm.variants.map(v => `<tr><td><span class="vbadge ${v.kind}">${v.lab}</span></td><td class="w"><b>${esc(v.title)}</b>${v.note ? `<div class="hint">${esc(v.note)}</div>` : ''}</td><td>${esc(v.route)}</td><td class="n">${km(v.km)}</td><td class="n">+${v.up}</td><td class="n">−${v.dn}</td><td>${esc(v.objects.join('; '))}</td></tr>`).join('')}
+        </tbody></table></div><div class="hint">Варианты не входят в километраж и набор маршрута выше. Набор — по модели рельефа.</div></div>` : ''}
     </section></div>`;
 }
 let pollT = null;
@@ -953,8 +1039,9 @@ function hintOff() { const h = $('.maphint'); h && h.remove(); const m = $('#map
 // Режимы карты: 'add' — поставить точку, 'cut' — разрезать нитку, 'band1'/'band2' — начало и конец участка
 function setMode(m, text) {
   S.mode = m; hintOff(); if (m !== 'band2') S.bandA = m === 'band1' ? null : S.bandA;
+  if (m !== 'draw') { S.drawPts = null; drawLayer && drawLayer.clearLayers(); }
   if (!m) { S.bandA = null; if (S.mapTemp) { S.mapTemp = null; applyMapSize(); } return; }
-  const h = document.createElement('div'); h.className = 'maphint'; h.innerHTML = `${esc(text)} <button class="icon-btn" data-a="modeoff" title="Отмена">${I.x}</button>`;
+  const h = document.createElement('div'); h.className = 'maphint'; h.innerHTML = `${esc(text)} ${m === 'draw' ? '<button class="btn sm" data-a="drawundo" title="Убрать последнюю точку">↶</button><button class="btn sm go" data-a="drawdone">Готово</button>' : ''}<button class="icon-btn" data-a="modeoff" title="Отмена">${I.x}</button>`;
   $('.mapwrap').append(h); $('#map').style.cursor = 'crosshair';
   if (isPhone() && mapSize() !== 'big') { S.mapTemp = 'big'; applyMapSize(); }   // на телефоне для клика по карте она разворачивается сама
 }
@@ -978,6 +1065,10 @@ function nearestOnTrack(latlng) {
 }
 async function mapClick(latlng) {
   if (!S.mode) return;
+  if (S.mode === 'draw') {      // вариант кликами; рядом с ниткой точка прилипает к ней — так вариант стыкуется с маршрутом
+    const n = nearestOnTrack(latlng); const q = n && n.piece && !VAR_ROLE(n.piece.role) ? [n.lat, n.lon] : [+latlng.lat.toFixed(6), +latlng.lng.toFixed(6)];
+    (S.drawPts = S.drawPts || []).push(q); drawPreview(); return;
+  }
   if (S.mode === 'add') {
     const obst = S.newType === 'pass'; S.newType = null;
     const q = { id: Math.random().toString(16).slice(2, 10), type: obst ? 'pass' : 'mark', name: '', lat: +latlng.lat.toFixed(6), lon: +latlng.lng.toFixed(6), on_map: true, on_profile: obst, nights: 1 };
@@ -1052,7 +1143,9 @@ function drawPieces() {
   };
   const ps = P().pieces;
   ps.filter(p => p.role === 'skip').forEach(p => draw(p, { color: '#8A97A8', weight: 2, dashArray: '2 6', opacity: .7 }));
-  ps.filter(p => p.role !== 'skip').forEach(p => draw(p, { color: !p.day && ps.some(x => x.day) ? '#F68A1D' : ((p.day || 1) % 2 ? RED : VIOLET), weight: S.selPiece === p.id ? 6.5 : 4, dashArray: p.role === 'radial' && radShape(p) !== 'loop' ? '8 7' : null }));
+  ps.filter(p => p.role === 'alt').forEach(p => draw(p, { color: '#1F6FD1', weight: 3.2, dashArray: '9 6' }));
+  ps.filter(p => p.role === 'exit').forEach(p => { draw(p, { color: '#E2001A', weight: 3.2 }); L.polyline(p.pts.map(q => [q[0], q[1]]), { color: '#111827', weight: 3.2, dashArray: '7 7', interactive: false }).addTo(pieceLayer); });
+  ps.filter(p => p.role === 'main' || p.role === 'radial').forEach(p => draw(p, { color: !p.day && ps.some(x => x.day) ? '#F68A1D' : ((p.day || 1) % 2 ? RED : VIOLET), weight: S.selPiece === p.id ? 6.5 : 4, dashArray: p.role === 'radial' && radShape(p) !== 'loop' ? '8 7' : null }));
 }
 function drawPoints() {
   if (!pointLayer) return; pointLayer.clearLayers(); markers = {};
@@ -1134,6 +1227,7 @@ const A = {
   todo(el) {
     const t = todos()[+el.dataset.i]; if (!t) return;
     if (t.fix === 'camps') return fixCamps();
+    if (t.fix === 'mkvar') return mkVarsAuto(t.ids);
     if (t.fix === 'campyear') {      // год ночёвки сильно не совпадает с годом похода — ставим год похода (а если даты на стыке лет — ближайший)
       const y0 = +P().meta.start_date.slice(0, 4); let n = 0;
       for (const q of P().points) if (q.type === 'camp' && q.date && Math.abs(+q.date.slice(0, 4) - y0) > 1) {
@@ -1192,16 +1286,35 @@ const A = {
   tosettings() { const p = $('.build .panel'); p && p.scrollIntoView({ behavior: 'smooth' }); },
   view(el, ev) { if (ev.target.closest('[data-stop]')) return; lightbox(+el.dataset.i); },
 };
+A.mkvarauto = () => mkVarsAuto(daysModel().loose.map(p => p.id));
+A.importas = el => { S.importAs = el.dataset.v; paintPanel(); };
+A.mkvars = el => { const ids = daysModel().loose.map(p => p.id); return varOp({ action: 'make', pieces: ids, kind: el.dataset.k }, 'Делаю варианты…'); };
+A.vkind = el => { const v = (P().variants || []).find(x => x.id === el.dataset.id); if (!v) return; v.kind = el.dataset.v; P().pieces.forEach(p => { if (p.var === v.id) p.role = v.kind; }); dirty(); paintPanel(); drawPieces(); };
+A.vshow = el => { const ll = P().pieces.filter(p => p.var === el.dataset.id).flatMap(p => p.pts.map(q => [q[0], q[1]])); if (ll.length && map) { if (isPhone() && mapSize() !== 'big') { S.mapTemp = 'big'; applyMapSize(); } map.fitBounds(L.latLngBounds(ll), { padding: [40, 40], maxZoom: 14 }); } };
+A.vunmake = el => varOp({ action: 'unmake', var: el.dataset.id });
+A.vsplit = el => varOp({ action: 'split', piece: el.dataset.id });
+A.drawvar = el => { S.drawKind = el.dataset.k; S.drawPts = []; setMode('draw', `Ставь точки ${el.dataset.k === 'alt' ? 'запасного варианта' : 'аварийного выхода'} кликами по карте; у нитки точка прилипнет к ней`); };
+A.drawundo = () => { (S.drawPts || []).pop(); drawPreview(); };
+A.drawdone = async () => {
+  const pts = S.drawPts || []; if (pts.length < 2) return toast('Нужно хотя бы две точки', true);
+  const kind = S.drawKind; setMode(null); await varOp({ action: 'draw', pts, kind }, 'Сохраняю вариант…');
+};
+A.pmode = el => { P().meta.mode = el.dataset.v; dirty(); paintPanel(); };
 A.pshape = el => { const p = pieceById(el.dataset.id), v = el.dataset.v; if (v === radAuto(p)) delete p.shape; else p.shape = v; dirty(); paintPanel(); drawPieces(); };
 A.ponce = el => { const p = pieceById(el.dataset.id), v = el.dataset.v === '1'; if (v === (P().meta.radial_one_way !== false)) delete p.once; else p.once = v; dirty(); paintPanel(); };
 const C = {
+  vtitle(el) { const v = (P().variants || []).find(x => x.id === el.dataset.id); if (v) { v.title = el.value; dirty(); } },
+  vnote(el) { const v = (P().variants || []).find(x => x.id === el.dataset.id); if (v) { v.note = el.value; dirty(); } },
+  vjoin(el) { if (el.value) varOp({ action: 'join', var: el.dataset.id, into: el.value }); },
   title(el) { P().meta.title = el.value; document.title = (el.value || 'Поход') + ' — Нитка'; dirty(); },
   start(el) { P().meta.start_date = el.value || null; dirty(); paintPanel(); },
   kcoef(el, final) { const v = Math.min(3, Math.max(1, +String(el.value).replace(',', '.') || 1)); P().meta.kcoef = v; dirty(); if (final) paintPanel(); },
   oneway(el) { P().meta.radial_one_way = el.checked; dirty(); paintPanel(); },
   pday(el, final) { const p = pieceById(el.dataset.id); const v = parseInt(el.value, 10); p.day = v >= 1 ? v : null; dirty(); if (final) { paintPanel(); drawPieces(); } },
   async prole(el) {
-    const p = pieceById(el.dataset.id); p.role = el.value; dirty(); paintPanel(); drawPieces();
+    const p = pieceById(el.dataset.id);
+    if (VAR_ROLE(el.value)) { await varOp({ action: 'make', pieces: [p.id], kind: el.value }, 'Делаю вариант…'); const c = $('#vars'); c && c.scrollIntoView({ block: 'start', behavior: 'smooth' }); return; }
+    p.role = el.value; dirty(); paintPanel(); drawPieces();
     if (p.role === 'radial' && !p.rinfo) {      // форму новой радиалки считает сервер — подтягиваем её
       try { await flush(); const d = await api('GET', `/api/projects/${S.pid}`, undefined, false, false); const q = d.project.pieces.find(x => x.id === p.id); if (q && q.rinfo) { p.rinfo = q.rinfo; paintPanel(); drawPieces(); } } catch (e) { /* покажем без подсказки */ }
     }

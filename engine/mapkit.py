@@ -616,6 +616,17 @@ def g_track(color, casing=True, arrow=True, w=0.8):
             s = mm(1.0); d.polygon([(x + s, y), (x - s * 0.8, y - s * 0.75), (x - s * 0.35, y), (x - s * 0.8, y + s * 0.75)], fill=color, outline=(255, 255, 255))
     return f
 
+ALT_COL, EXIT_RED, EXIT_INK = (31, 111, 209), (226, 0, 26), (17, 24, 39)      # запасной вариант, аварийный выход
+
+def g_exit():
+    """Аварийный выход: чёрно-красный штрих."""
+    def f(d, x, y):
+        d.line((x - mm(3.5), y, x + mm(3.5), y), fill=(255, 255, 255), width=int(mm(1.0)))
+        d.line((x - mm(3.5), y, x + mm(3.5), y), fill=EXIT_RED, width=int(mm(0.5)))
+        for k in range(3):
+            xa = x - mm(3.5) + k * mm(2.6); d.line((xa, y, xa + mm(1.3), y), fill=EXIT_INK, width=int(mm(0.5)))
+    return f
+
 def g_frame(color):
     """Рамка листа рабочей карты с номером в углу."""
     def f(d, x, y):

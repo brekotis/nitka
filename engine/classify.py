@@ -98,6 +98,34 @@ def piece_hint(name, year):
     return None
 
 def is_radial_name(name): return bool(re.search(r'рад(иал|\.|\b)', (name or '').lower()))
+# Варианты маршрута: запасной (alt) и аварийный выход (exit) — отдельные треки, в дни и километраж не входят
+VAR_ROLES = ('alt', 'exit')
+def variant_kind(name):
+    n = (name or '').lower()
+    if re.search(r'аварийн|авар\.|эвакуац|(^|[^а-яё])сход($|[^а-яё])|аварийк', n): return 'exit'
+    if re.search(r'запасн|альтернат|вариант|варинат|обход', n) and not re.search(r'основн', n): return 'alt'
+    return None
+
+def variant_title(name):
+    return re.sub(r'\s*·\s*часть\s*\d+$', '', re.sub(r'\.(gpx|kml|kmz|geojson|json)\b', '', name or '', flags=re.I)).strip(' -–·') or 'вариант'
+
+def add_variant(proj, kind, title):
+    v = dict(id=uid(), kind=kind, title=title[:80], note='')
+    proj.setdefault('variants', []).append(v)
+    return v
+
+def group_variants(proj, pieces, kind, title=None):
+    """Куски → варианты. Куски одного трека, которые стыкуются (конец одного у начала другого, до 300 м), — один вариант;
+    несвязанные куски — разные варианты (у Паши «Запасные варианты» — шесть разных обходов одним треком)."""
+    made = []; cur = None; last = None; base = None
+    for p in pieces:
+        b = title or variant_title(p['name'])
+        if not (cur and b == base and last and dist(last, tuple(p['pts'][0][:2])) < 300):
+            cur = add_variant(proj, kind, b); made.append(cur); base = b
+        p['role'] = kind; p['var'] = cur['id']; p['day'] = None; p.pop('shape', None); p.pop('once', None)
+        last = tuple(p['pts'][-1][:2])
+    return made      # одинаковые названия различает номер варианта (З1, З2…) — он идёт по ходу маршрута
+
 def is_summary_name(name): return bool(re.search(r'вес[ьъ]\s+маршрут|общий|полный трек|all\b|план\b|заявлен', (name or '').lower()))
 
 # ---------------------------------------------------------------- названия точек
@@ -249,7 +277,7 @@ def classify_point(name, folder='', sym='', year=None):
 # ---------------------------------------------------------------- сборка проекта
 def new_project(title=''):
     return dict(v=1, meta=dict(title=title, area='', kind='пеший', category='', start_date=None, kcoef=1.0, radial_one_way=True, elev='auto', note=''),
-                pieces=[], points=[], bands=[], custom_types=[], sources=[],
+                pieces=[], points=[], bands=[], custom_types=[], sources=[], variants=[],
                 sheets=dict(region=True, overview=True, work=True, days=True, profile=True, work_scale=100000, photos=True, logo=True, base='otm', adjust={}))
 
 def cut_piece(proj, pid, lat, lon):
@@ -306,8 +334,9 @@ def _pts_out(seg):
         return out
     return [[round(p[0], 6), round(p[1], 6)] for p in seg]
 
-def merge_import(proj, layers, src_name):
-    """Добавляет слои в проект. Возвращает сводку: что нашлось."""
+def merge_import(proj, layers, src_name, as_role='main'):
+    """Добавляет слои в проект. as_role: main — как обычно (варианты узнаются по названию), alt / exit — всё из этой
+    загрузки — запасной вариант или аварийный выход. Возвращает сводку: что нашлось."""
     meta = proj['meta']
     meta.pop('no_passes', None)      # нитка меняется — перевалы по каталогу стоит поискать заново
     sid = uid()
@@ -383,7 +412,7 @@ def merge_import(proj, layers, src_name):
             delta = 1 - (lo - meta['lead_base']); shift_days(delta); meta['lead_base'] -= delta
             if start: start = start - timedelta(days=delta); meta['start_date'] = start.isoformat()
     order0 = len(proj['pieces'])
-    n_assigned = 0
+    n_assigned = 0; var_pieces = []
     for i, p in enumerate(new_pieces):
         day = None
         if p['hint']:
@@ -392,9 +421,16 @@ def merge_import(proj, layers, src_name):
             elif start: day = (p['hint'][1] - start).days + 1
             if day is not None and day < 1: day = None
         pts = _pts_out(p['seg'])
+        vk = as_role if as_role in VAR_ROLES else (None if (day or p['skip']) else variant_kind(p.get('base') or p['name']))
+        if vk:                                # запасной вариант или аварийный выход — в варианты после разбора всех кусков
+            x = dict(id=uid(), src=sid, name=p['name'], pts=pts, day=None, role=vk, order=order0 + i, km=round(length_km(pts), 2))
+            proj['pieces'].append(x); var_pieces.append((vk, x))
+            continue
         role = 'skip' if p['skip'] else ('radial' if is_radial_name(p['name']) else 'main')
         if day: n_assigned += 1
         proj['pieces'].append(dict(id=uid(), src=sid, name=p['name'], pts=pts, day=day, role=role, order=order0 + i, km=round(length_km(pts), 2)))
+
+    var_made = [v for kind in VAR_ROLES for v in group_variants(proj, [x for k, x in var_pieces if k == kind], kind)]
 
     # точки
     seen = [(q.get('raw'), q['lat'], q['lon']) for q in proj['points']]
@@ -421,7 +457,8 @@ def merge_import(proj, layers, src_name):
     chain_order(proj, {x['day'] for x in proj['pieces'] if x.get('src') == sid and x.get('day')})
     proj['sources'].append(dict(id=sid, name=src_name, pieces=len(new_pieces), points=sum(counts.values())))
     return dict(source=sid, pieces=len(new_pieces), assigned=n_assigned, skipped=sum(1 for p in new_pieces if p['skip']), points=counts,
-                unassigned=sum(1 for p in proj['pieces'] if not p.get('day') and p['role'] != 'skip'))
+                variants=[dict(kind=v['kind'], title=v['title']) for v in var_made],
+                unassigned=sum(1 for p in proj['pieces'] if not p.get('day') and p['role'] in ('main', 'radial')))
 
 def chain_order(proj, days=None):
     """Куски основной нитки внутри дня — по ходу движения: день продолжает предыдущий, каждый следующий кусок

@@ -5,7 +5,7 @@ Builder(trip, out_dir, opts).plan() → список листов; .render(id) �
 import math, os
 from PIL import Image, ImageDraw, ImageChops
 from . import mapkit as mk, profile as prof
-from .mapkit import font, mm, INK, View, Overlay, Sheet, g_track, g_dash, g_sym, g_band, g_frame, DAY_COLORS
+from .mapkit import font, mm, INK, View, Overlay, Sheet, g_track, g_dash, g_sym, g_band, g_frame, g_exit, DAY_COLORS, ALT_COL, EXIT_RED, EXIT_INK
 from .model import GRADE_COL
 from .classify import GRADES, dist
 
@@ -94,7 +94,7 @@ class Builder:
             self.PROF_NOTE = 'Высоты — по записи трека (GPS/барометр), слегка сглажены' + ('; в точках перевалов и вершин привязаны к высотам из подписей' if pinned else '') + '. '
         else:
             self.PROF_NOTE = 'Высоты — по цифровой модели рельефа (SRTM/Copernicus, ≈30 м)' + (' с привязкой к высотам перевалов и вершин' if pinned else '') + '; высоты ночёвок округлены до 10 м. '
-        self.PROF_NOTE += 'Расстояния — длина нитки по треку группы' + kx + '.'
+        self.PROF_NOTE += ('Расстояния — длина нитки по планируемому маршруту' if T.plan else 'Расстояния — длина нитки по треку группы') + kx + '.'
         self.RAD_NOTE = 'Радиальные выходы входят в километраж в одну сторону: обратный путь на графике показан бледнее, километры на нём не считаются.'
         self.n_pass = sum(1 for o in T.OBJ if o['kind'] == 'pass'); pk = [o for o in T.OBJ if o['kind'] == 'peak']; self.n_peak = sum(1 for o in pk if o['grade']) or len(pk)
         self.grades = [g for g in GRADES if any(o['grade'] == g for o in T.OBJ)]
@@ -368,6 +368,17 @@ class Builder:
             if not focus or focus in (a, b): ov.line([p, q], GREY, 0.45, casing=(255, 255, 255), casing_mm=0.2, dash=(0.7, 0.8))
         for d, p, q in T.GAPS:
             if not focus or focus == d: ov.line([p, q], GREY, 0.45, casing=(255, 255, 255), casing_mm=0.2, dash=(0.7, 0.8))
+        vis_vars = []
+        for V in T.VARS:                                   # запасные варианты и аварийные выходы — под основной ниткой, тоньше её
+            runs = [r for r in V['shown'] if any(v.inside(*q, pad=40) for q in r[::3] + r[-1:])]
+            if not runs: continue
+            vis_vars.append((V, runs))
+            for r in runs:
+                if V['kind'] == 'alt': ov.line(r, ALT_COL, w * 0.62, casing=(255, 255, 255), casing_mm=0.2, dash=(2.0, 1.1))
+                else:
+                    ov.line(r, EXIT_RED, w * 0.6, casing=(255, 255, 255), casing_mm=0.2); ov.line(r, EXIT_INK, w * 0.6, dash=(1.4, 1.4))
+                    ov.arrows(r, EXIT_INK, 26, size_mm=1.6)
+        self._vis_vars = vis_vars
         for d in T.DAYS:
             if focus and d != focus: continue
             D = T.DAYS[d]
@@ -427,6 +438,12 @@ class Builder:
                 ov.label(*o['pt'], o['title'], pt - 0.6, color=lab_col(o), italic=True, prefer=pref(o))
         for c in camps:
             if focus and focus not in (c['after'], c['before']): ov.label(*c['pt'], c['lab'], pt - 0.6, color=prof.CAMP_INK, prefer=pref(c))
+        for V, runs in vis_vars:
+            r = max(runs, key=len); ins = [q for q in r if v.inside(*q, pad=-40)] or r
+            q = ins[len(ins) // 2]
+            # на карте «З1» читается как «31» — пишем словом
+            t = ('зап. ' if V['kind'] == 'alt' else 'ав. ') + str(V['num']) + (f" → {V['target']}" if V['kind'] == 'exit' and V['target'] else '')
+            ov.label(*q, t, pt - 0.2, bold=True, color=(255, 255, 255), halo=None, bg=ALT_COL if V['kind'] == 'alt' else EXIT_INK, gap_mm=1.2, force=True, leader=True)
         if pois == 'label':
             for o in pl:
                 col = o['color'] if o['sym'] in ('letter', 'water', 'plan', 'exit') else INK
@@ -462,6 +479,9 @@ class Builder:
             items += [(g_track(DAYC[0]), 'нитка, нечётные дни; ▶ направление'), (g_track(DAYC[1]), 'нитка, чётные дни')]
         else: items.append((g_track(DAYC[0]), 'нитка маршрута; ▶ направление'))
         if self.has_rad: items.append((g_dash(DAYC[0], 0.6), 'радиальный выход'))
+        vv = [V for V, _ in getattr(self, '_vis_vars', [])] if view is not None else T.VARS
+        if any(V['kind'] == 'alt' for V in vv): items.append((g_dash(ALT_COL, 0.5), 'запасной вариант (зап. 1, 2…)'))
+        if any(V['kind'] == 'exit' for V in vv): items.append((g_exit(), 'аварийный выход (ав. 1, 2…)'))
         if T.TRANSFERS or T.GAPS: items.append((g_dash(GREY, 0.45), 'переезд (без трека)'))
         if T.CAMPS: items.append((g_sym('camp', size=3.6), 'ночёвка: №, дата' + ('' if numbers else ', высота')))
         items.append((lambda d, x, y: (g_sym('start', size=3.0)(d, x - mm(1.8), y), g_sym('finish', size=2.8)(d, x + mm(2.2), y)),
@@ -501,7 +521,7 @@ class Builder:
         tx = x + mm(3) + L + mm(6)
         sh.d.text((tx, y - mm(1.6)), per_cm(sc), font=font(6.3, cond=True), fill=INK, anchor='la')
         f = font(5.8, cond=True); room = sh.frame_box[2] - mm(9) - tx; lines = []
-        what = ', '.join(['Нитка'] + (['ночёвки'] if self.T.CAMPS else []) + (['перевалы'] if self.n_pass else [])) + ' — трек группы.'
+        what = ', '.join(['Нитка'] + (['ночёвки'] if self.T.CAMPS else []) + (['перевалы'] if self.n_pass else [])) + (' — планируемый маршрут.' if self.T.plan else ' — трек группы.')
         for t in [src, what, *extra_lines, self.KM_NOTE]:
             if t is self.KM_NOTE and sh.d.textlength(t, font=f) > room: t = self.KM_NOTE_SHORT
             if lines and sh.d.textlength(lines[-1] + ' ' + t, font=f) <= room: lines[-1] += ' ' + t; continue
@@ -616,7 +636,7 @@ class Builder:
         hp = self.headline()
         sub = ' · '.join(x for x in [T.period(), *hp, f'схема листов рабочей карты {scale_txt(wsc)}' if scheme else ''] if x)
         gs = {100000: (2, 3), 200000: (3, 5), 300000: (5, 10), 500000: (10, 15)}.get(sc, (None, None))
-        sh = Sheet(v, base, ov.render(), ' · '.join(x for x in ['Обзорная карта маршрута', self.area] if x), sub, PW, FH + 16, top_cm=1.5, lat_step=gs[0] and gs[0] / 60, lon_step=gs[1] and gs[1] / 60)
+        sh = Sheet(v, base, ov.render(), ' · '.join(x for x in ['Обзорная карта маршрута' + (' (план)' if T.plan else ''), self.area] if x), sub, PW, FH + 16, top_cm=1.5, lat_step=gs[0] and gs[0] / 60, lon_step=gs[1] and gs[1] / 60)
         y = self.foot(sh, sc, st['src'])
         x = sh.frame_box[0]; d = sh.d
         extra = [(g_frame((69, 155, 214)), f'лист рабочей карты {scale_txt(wsc)}, номер — в углу')] if scheme else []
@@ -631,7 +651,8 @@ class Builder:
                 col = GRADE_COL[o['grade']] if o['kind'] != 'obst' else (200, 0, 0)
                 d.rounded_rectangle((xx, yr - mm(1.3), xx + mm(4.2), yr + mm(1.3)), radius=int(mm(0.5)), fill=col)
                 d.text((xx + mm(2.1), yr), str(o['num']), font=fb, fill=(255, 255, 255), anchor='mm')
-                t = T.obj_label(o) + ((' · ' + ('дни ' if len(o['days']) > 1 else 'день ') + ', '.join(map(str, o['days']))) if o['days'] else '')
+                t = T.obj_label(o) + ((' · ' + ('дни ' if len(o['days']) > 1 else 'день ') + ', '.join(map(str, o['days']))) if o['days'] else
+                                      (' · вариант ' + ', '.join(('зап. ' if l[0] == 'З' else 'ав. ') + l[1:] for l in o['vars'])) if o.get('vars') else '')
                 while d.textlength(t, font=f) > colw - mm(6.5) and len(t) > 8: t = t[:-2].rstrip() + '…'
                 d.text((xx + mm(5.4), yr), t, font=font(6.0, True, cond=True) if o['key'] else f, fill=INK, anchor='lm')
             yy += rows * mm(3.5) + mm(1.5)

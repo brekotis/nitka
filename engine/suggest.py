@@ -44,7 +44,7 @@ def info():
 
 def day_chains(proj):
     """{день: [(lat, lon), ...]} — нитка дня по порядку кусков; без разбивки по дням всё считается днём 1."""
-    pcs = [p for p in sorted(proj.get('pieces', []), key=lambda p: p.get('order', 0)) if p.get('role') != 'skip' and len(p.get('pts', [])) > 1]
+    pcs = [p for p in sorted(proj.get('pieces', []), key=lambda p: p.get('order', 0)) if p.get('role') in ('main', 'radial') and len(p.get('pts', [])) > 1]
     any_day = any(p.get('day') for p in pcs); out = {}
     for p in pcs:
         d = p.get('day') if any_day else 1
@@ -95,7 +95,7 @@ def passes(proj, radius=400.0, sure=150.0):
 
 def camps(proj):
     """Ночёвки в концах дней: [{lat, lon, date|None, after_day, nights, note}] — там, где ночёвка ещё не отмечена."""
-    pcs = [p for p in sorted(proj.get('pieces', []), key=lambda p: p.get('order', 0)) if p.get('role') != 'skip' and p.get('day') and len(p.get('pts', [])) > 1]
+    pcs = [p for p in sorted(proj.get('pieces', []), key=lambda p: p.get('order', 0)) if p.get('role') in ('main', 'radial') and p.get('day') and len(p.get('pts', [])) > 1]
     days = {}
     for p in pcs: days.setdefault(int(p['day']), dict(main=[], rad=[]))['rad' if p.get('role') == 'radial' else 'main'].append(p['pts'])
     ds = sorted(days)

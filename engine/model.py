@@ -112,6 +112,30 @@ def radial_info(r, shape='auto'):
     sp = split.get('lolli') if form == 'lolli' else split.get('back') if form == 'recorded' else None
     return dict(form=form, split=sp, auto=auto, drawn_lolli=form == 'lolli' and split.get('drawn_lolli', False))
 
+class SegIndex:
+    """Ближайший отрезок среди линий: сетка ~200 м, чтобы не перебирать всю нитку для каждой точки."""
+    def __init__(self, lines, cell=200.0):
+        lat0 = next((l[0][0] for l in lines if l), 0.0)
+        self.mx = 111320 * math.cos(math.radians(lat0)); self.my = 110540; self.cell = cell; self.g = {}; self.segs = []
+        for li, l in enumerate(lines):
+            for i in range(len(l) - 1):
+                a, b = l[i], l[i + 1]; k = len(self.segs); self.segs.append((a, b, li, i))
+                for cx in range(int(min(a[1], b[1]) * self.mx // cell), int(max(a[1], b[1]) * self.mx // cell) + 1):
+                    for cy in range(int(min(a[0], b[0]) * self.my // cell), int(max(a[0], b[0]) * self.my // cell) + 1):
+                        self.g.setdefault((cx, cy), []).append(k)
+
+    def near(self, p, reach=200.0):
+        """(расстояние, номер линии, номер отрезка в ней) до ближайшего отрезка не дальше reach (иначе расстояние — бесконечность)."""
+        r = int(math.ceil(reach / self.cell)); cx, cy = int(p[1] * self.mx // self.cell), int(p[0] * self.my // self.cell)
+        best = (float('inf'), None, None); seen = set()
+        for gx in range(cx - r, cx + r + 1):
+            for gy in range(cy - r, cy + r + 1):
+                for k in self.g.get((gx, gy), ()):
+                    if k in seen: continue
+                    seen.add(k); a, b, li, i = self.segs[k]; d = _seg_dist(p, a, b)
+                    if d < best[0]: best = (d, li, i)
+        return best
+
 def radial_form(r, shape='auto'):
     return radial_info(r, shape)['form']
 
@@ -153,7 +177,7 @@ class Trip:
             self.types[c['id']] = dict(id=c['id'], title=c.get('title') or 'Своя точка', sym='letter', text=(c.get('letter') or '•')[:2], color=hexcol(c.get('color', '')), custom=True)
 
         # ------------------------------------------------ дни
-        pieces = [p for p in sorted(proj.get('pieces', []), key=lambda p: p.get('order', 0)) if p.get('role') != 'skip' and len(p.get('pts', [])) > 1]
+        pieces = [p for p in sorted(proj.get('pieces', []), key=lambda p: p.get('order', 0)) if p.get('role') in ('main', 'radial', None) and len(p.get('pts', [])) > 1]
         if pieces and not any(p.get('day') for p in pieces):
             for p in pieces: p = p   # один трек без разбивки — один «день»
             daymap = {id(p): 1 for p in pieces}
@@ -277,6 +301,92 @@ class Trip:
             self.BANDS.append(dict(day=d, kind=b.get('kind') if st else 'custom:' + title, title=title, color=color, hatch=hatch, pts=P['pts'][i:j + 1],
                                    x0=P['x'][i], x1=P['x'][j], km=P['c'][j] - P['c'][i]))
         self.BANDS.sort(key=lambda b: (b['day'], b['x0']))
+        self._variants(proj)
+
+    # ---------------------------------------------------------------- запасные варианты и аварийные выходы
+    def _variants(self, proj):
+        """VARS: варианты маршрута. Где отходят от нитки и куда ведут, км, набор, перевалы на них; на картах рисуется
+        только та часть, что отошла от основной нитки дальше 100 м (иначе вариант ложится поверх неё)."""
+        self.VARS = []
+        defs = {v.get('id'): v for v in proj.get('variants', []) if isinstance(v, dict)}
+        groups = {}
+        for p in sorted(proj.get('pieces', []), key=lambda p: p.get('order', 0)):
+            if p.get('role') not in ('alt', 'exit') or len(p.get('pts', [])) < 2: continue
+            pts = []
+            for q in p['pts']:
+                t = (q[0], q[1])
+                if not pts or t != pts[-1]: pts.append(t)
+            if len(pts) > 1: groups.setdefault(p.get('var') or p['id'], dict(kind=p['role'], lines=[]))['lines'].append(pts)
+        if not groups: return
+        lines, lday = [], []
+        for d in self.DAYS:
+            for l in self.day_lines(d): lines.append(l); lday.append(d)
+        idx = SegIndex(lines)
+        pos = {}                                # положение точки на маршруте — чтобы нумеровать варианты по ходу
+        acc = 0
+        for li, l in enumerate(lines): pos[li] = acc; acc += len(l)
+        towns = [o for o in self.POI if o['type'] in ('town', 'transport', 'exit', 'house')]
+        mountain = self._mountain()
+        for vid, g in groups.items():
+            v = defs.get(vid) or {}; kind = v.get('kind') if v.get('kind') in ('alt', 'exit') else g['kind']; ls = g['lines']
+            shown = []
+            for l in ls:
+                run = []; prev = None
+                for q in l:
+                    if idx.near(q, 120)[0] > 100:
+                        if not run and prev is not None: run.append(prev)
+                        run.append(q)
+                    else:
+                        if run: run.append(q); shown.append(run) if len(run) > 1 else None; run = []
+                    prev = q
+                if len(run) > 1: shown.append(run)
+            a, e = ls[0][0], ls[-1][-1]
+            da, la, ia = idx.near(a, 1000); de, le, _ = idx.near(e, 1000)
+            frm = lday[la] if la is not None else None; to = lday[le] if le is not None else None
+            tgt = min(towns, key=lambda o: dist(o['pt'], e), default=None)
+            target = tgt['title'] if tgt and dist(tgt['pt'], e) < 3000 else None
+            L = sum(dist(x, y) for l in ls for x, y in zip(l, l[1:]))
+            up = dn = 0.0
+            for l in ls:                        # набор и сброс — по модели рельефа, как у нарисованной нитки
+                dense = []
+                for x, y in zip(l, l[1:]):
+                    n = max(1, int(math.ceil(dist(x, y) / STEP)))
+                    dense += [(x[0] + (y[0] - x[0]) * k / n, x[1] + (y[1] - x[1]) * k / n) for k in range(n)]
+                dense.append(l[-1]); self._S.prefetch(dense)
+                z = [self._S(*q) for q in dense]; h = 2 if mountain else 4
+                z = [sum(z[max(0, i - h):i + h + 1]) / len(z[max(0, i - h):i + h + 1]) for i in range(len(z))]
+                ref = z[0]
+                for vv in z[1:]:
+                    if vv - ref >= 5: up += vv - ref; ref = vv
+                    elif ref - vv >= 5: dn += ref - vv; ref = vv
+            self.VARS.append(dict(id=vid, kind=kind, title=(v.get('title') or '').strip() or 'вариант', note=(v.get('note') or '').strip(), lines=ls, shown=shown,
+                                  km=L / 1000 * self.kcoef, up=up, dn=dn, frm=frm, to=to, target=target, joins=de < 300,
+                                  order=(pos[la] + ia if la is not None else 1e9), objects=[]))
+        n = {'alt': 0, 'exit': 0}
+        for V in sorted(self.VARS, key=lambda V: (V['order'], V['title'])):
+            n[V['kind']] += 1; V['num'] = n[V['kind']]; V['lab'] = ('З' if V['kind'] == 'alt' else 'А') + str(V['num'])
+        self.VARS.sort(key=lambda V: (V['kind'] != 'alt', V['num']))
+        vidx = [SegIndex(V['lines']) for V in self.VARS]
+        for o in self.OBJ:                       # перевал на варианте, а не на основной нитке, — принадлежит варианту
+            o['vars'] = []
+            if o['days']: continue
+            for V, vi in zip(self.VARS, vidx):
+                if vi.near(o['pt'], 200)[0] < 150: o['vars'].append(V['lab']); V['objects'].append(self.obj_label(o))
+
+    def var_route(self, V):
+        """«от дня 9 до дня 11», «с дня 7 → Кировск»."""
+        a = f"от дня {V['frm']}" if V['frm'] else 'отдельно от нитки'
+        if V['kind'] == 'exit' or not V['joins']:
+            b = V['target'] or ('к нитке, день ' + str(V['to']) if V['joins'] and V['to'] else '')
+            return f"{a} → {b}" if b else a
+        return f"{a} до дня {V['to']}" if V['to'] and V['to'] != V['frm'] else (f"день {V['frm']}" if V['frm'] else a)
+
+    @property
+    def plan(self):
+        """Поход ещё впереди — карты подписываются как план (можно переключить вручную)."""
+        m = self.meta.get('mode')
+        if m in ('plan', 'report'): return m == 'plan'
+        return bool(self.start and self.start > date.today())
 
     # ---------------------------------------------------------------- даты
     def date_obj(self, d):
@@ -469,6 +579,9 @@ class Trip:
                        key_objects=[self.obj_label(self.OBJ[m['oi']]) for m in self.profile(d)['marks'] if m.get('oi') is not None and m['first'] and self.OBJ[m['oi']]['key']]) for d in self.DAYS],
             rest=sorted(self.REST),
             camps=[dict(lab=c['lab'], date=c['date'], h=self.camp_height(c), name=c['name'], after=c['after']) for c in self.CAMPS],
-            objects=[dict(num=o['num'], title=o['title'], grade=o['grade'], h=o['h'], kind=o['kind'], days=o['days'], key=o['key']) for o in self.OBJ_ORDERED],
+            objects=[dict(num=o['num'], title=o['title'], grade=o['grade'], h=o['h'], kind=o['kind'], days=o['days'], key=o['key'], vars=o.get('vars', [])) for o in self.OBJ_ORDERED],
             transfers=[dict(a=a, b=b, km=round(dist(p, q) / 1000, 1)) for a, b, p, q in self.TRANSFERS],
-            bands=[dict(day=b['day'], title=b['title'], km=round(b['km'], 1)) for b in self.BANDS])
+            bands=[dict(day=b['day'], title=b['title'], km=round(b['km'], 1)) for b in self.BANDS],
+            variants=[dict(lab=V['lab'], kind=V['kind'], title=V['title'], note=V['note'], route=self.var_route(V), km=round(V['km'], 1),
+                           up=int(round(V['up'])), dn=int(round(V['dn'])), objects=V['objects']) for V in self.VARS],
+            plan=self.plan)
