@@ -2,7 +2,7 @@
 
 python3 -m server.app            (NITKA_PORT=8080, NITKA_DATA=./data, NITKA_CODE=<кодовое слово клуба, необязательно>)
 """
-import gzip, hashlib, hmac, io, json, mimetypes, os, queue, re, secrets, shutil, sqlite3, subprocess, sys, threading, time, urllib.parse, zipfile
+import gzip, hashlib, hmac, io, json, mimetypes, os, queue, re, secrets, shutil, sqlite3, subprocess, sys, threading, time, urllib.parse, zipfile, zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
@@ -53,7 +53,15 @@ def init_db():
       CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, user_id INTEGER, title TEXT, json TEXT, card TEXT, created REAL, updated REAL);
       CREATE INDEX IF NOT EXISTS projects_user ON projects(user_id, updated);
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+      CREATE TABLE IF NOT EXISTS members(project_id TEXT, user_id INTEGER, role TEXT, added REAL, PRIMARY KEY(project_id, user_id));
+      CREATE INDEX IF NOT EXISTS members_user ON members(user_id);
+      CREATE TABLE IF NOT EXISTS shares(token TEXT PRIMARY KEY, project_id TEXT, role TEXT, created REAL);
+      CREATE INDEX IF NOT EXISTS shares_project ON shares(project_id);
+      CREATE TABLE IF NOT EXISTS revisions(id INTEGER PRIMARY KEY, project_id TEXT, user_id INTEGER, ts REAL, t0 REAL, kind TEXT, what TEXT, km REAL, data BLOB);
+      CREATE INDEX IF NOT EXISTS revisions_project ON revisions(project_id, id);
     ''')
+    if 'by' not in [r[1] for r in c.execute('PRAGMA table_info(projects)')]:
+        c.execute('ALTER TABLE projects ADD COLUMN by INTEGER')       # кто последним менял поход
     cols = [r[1] for r in c.execute('PRAGMA table_info(users)')]
     if 'origin' not in cols:
         c.execute('ALTER TABLE users ADD COLUMN origin TEXT')        # «откуда вы» — турклуб, город и т. п.
@@ -121,16 +129,108 @@ def card_of(proj):
              last=max(days) if days else 0, pieces=len(pcs), points=sum(1 for p in proj.get('points', []) if p.get('type') != 'skip'), thumb=thumb)
     return c
 
-def load_project(pid, uid):
-    r = db().execute('SELECT * FROM projects WHERE id=? AND user_id=?', (pid, uid)).fetchone()
-    return (json.loads(r['json']), r) if r else (None, None)
-
-def save_project(pid, uid, proj, create=False):
+def save_project(pid, uid, proj, create=False, why=None, kind='auto', old=None):
+    """Сохранить поход (права проверены раньше) и записать в журнал. Возвращает версию — время сохранения."""
     proj['meta']['title'] = (proj['meta'].get('title') or '').strip()[:120] or 'Без названия'
-    now = time.time(); js = json.dumps(proj, ensure_ascii=False, separators=(',', ':')); card = json.dumps(card_of(proj), ensure_ascii=False)
+    now = time.time(); js = json.dumps(proj, ensure_ascii=False, separators=(',', ':')); card = card_of(proj)
+    c = db(); prev = None
+    if create: c.execute('INSERT INTO projects(id,user_id,title,json,card,created,updated,by) VALUES(?,?,?,?,?,?,?,?)', (pid, uid, proj['meta']['title'], js, json.dumps(card, ensure_ascii=False), now, now, uid))
+    else:
+        prev = c.execute('SELECT json, updated, by, user_id FROM projects WHERE id=?', (pid,)).fetchone()
+        c.execute('UPDATE projects SET title=?, json=?, card=?, updated=?, by=? WHERE id=?', (proj['meta']['title'], js, json.dumps(card, ensure_ascii=False), now, uid, pid))
+    c.commit()
+    try: journal(pid, uid, prev, old, proj, js, card.get('km'), why or ('поход создан' if create else None), 'base' if create else kind, now)
+    except Exception:
+        import traceback; traceback.print_exc()      # журнал не должен ломать сохранение
+    return rev_of(now)
+
+def rev_of(t): return f'{t:.6f}'
+
+# ---------------------------------------------------------------- общий доступ
+RANK = {'view': 1, 'edit': 2, 'owner': 3}
+
+def access(pid, uid):
+    """Что человек может с походом: 'owner', 'edit', 'view' или None."""
+    if not uid: return None
+    r = db().execute('SELECT user_id FROM projects WHERE id=?', (pid,)).fetchone()
+    if not r: return None
+    if r['user_id'] == uid: return 'owner'
+    m = db().execute('SELECT role FROM members WHERE project_id=? AND user_id=?', (pid, uid)).fetchone()
+    return m['role'] if m else None
+
+def share_of(token):
+    """Ссылка «поделиться» → (поход, права) или (None, None)."""
+    if not token or not re.fullmatch(r'[A-Za-z0-9_\-]{10,40}', str(token)): return None, None
+    r = db().execute('SELECT project_id, role FROM shares WHERE token=?', (token,)).fetchone()
+    return (r['project_id'], r['role']) if r else (None, None)
+
+def user_name(uid):
+    r = db().execute('SELECT name FROM users WHERE id=?', (uid,)).fetchone() if uid else None
+    return r['name'] if r else ''
+
+def share_state(pid, role):
+    c = db(); own = c.execute('SELECT p.user_id, u.name FROM projects p LEFT JOIN users u ON u.id=p.user_id WHERE p.id=?', (pid,)).fetchone()
+    links = {r['role']: r['token'] for r in c.execute('SELECT token, role FROM shares WHERE project_id=?', (pid,))}
+    mem = [dict(id=r['user_id'], name=r['name'] or '?', role=r['role'], added=r['added']) for r in
+           c.execute('SELECT m.user_id, m.role, m.added, u.name FROM members m LEFT JOIN users u ON u.id=m.user_id WHERE m.project_id=? ORDER BY m.added', (pid,))]
+    return dict(links=links, members=mem, owner=own['name'] if own else '', manage=role == 'owner')
+
+# ---------------------------------------------------------------- журнал изменений: версии похода, к любой можно вернуться
+REV_KEEP = 100                     # версий на поход
+REV_GAP, REV_SPAN = 600, 3600      # подряд идущие мелкие правки одного человека — одна версия (пауза < 10 мин, не дольше часа)
+META_WORDS = {'area': 'район', 'kind': 'вид похода', 'start_date': 'дата начала', 'kcoef': 'коэффициент км', 'mode': 'план или отчёт',
+              'tz': 'часовой пояс', 'radial_one_way': 'радиалки', 'category': 'категория', 'note': 'заметка'}
+PART_WORDS = {'bands': 'участки пути', 'sheets': 'настройки карт', 'variants': 'варианты', 'custom_types': 'свои типы точек',
+              'sources': 'файлы', 'frames': 'рамки листов', 'chrono': 'хронометраж'}
+
+def pack(js): return zlib.compress(js.encode('utf-8'), 6)
+def unpack(b): return json.loads(zlib.decompress(b).decode('utf-8'))
+
+def describe(a, b):
+    """Что поменялось между двумя состояниями похода — короткими словами для журнала."""
+    out = []
+    ma, mb = a.get('meta', {}), b.get('meta', {})
+    ch = [k for k in set(ma) | set(mb) if ma.get(k) != mb.get(k)]
+    if 'title' in ch: out.append(f'название: «{mb.get("title", "")}»')
+    for w in sorted({META_WORDS.get(k, 'настройки похода') for k in ch if k != 'title'}): out.append(w)
+    pa = {p['id']: p for p in a.get('pieces', [])}; pb = {p['id']: p for p in b.get('pieces', [])}
+    add = [i for i in pb if i not in pa]; rem = [i for i in pa if i not in pb]
+    if add or rem: out.append('треки: ' + ' '.join(x for x in (f'+{len(add)}' if add else '', f'−{len(rem)}' if rem else '') if x))
+    geo = [pb[i].get('name', '') for i in pb if i in pa and pa[i].get('pts') != pb[i].get('pts')]
+    if geo: out.append('правка трека ' + ', '.join(f'«{n}»' for n in geo[:2]) + (f' и ещё {len(geo) - 2}' if len(geo) > 2 else ''))
+    if any(any(pa[i].get(k) != pb[i].get(k) for k in ('day', 'order', 'role', 'var', 'shape', 'once', 'name')) for i in pb if i in pa): out.append('дни и куски')
+    nz = lambda q: {k: v for k, v in q.items() if v not in (None, '', [], {})}      # пустое поле и его отсутствие — одно и то же
+    qa = {q.get('id'): nz(q) for q in a.get('points', [])}; qb = {q.get('id'): nz(q) for q in b.get('points', [])}
+    na = sum(1 for i in qb if i not in qa); nr = sum(1 for i in qa if i not in qb); nc = sum(1 for i in qb if i in qa and qa[i] != qb[i])
+    if na or nr or nc: out.append('точки: ' + ', '.join(x for x in (f'+{na}' if na else '', f'−{nr}' if nr else '', f'изменено {nc}' if nc else '') if x))
+    for k in sorted(set(a) | set(b)):
+        if k in ('meta', 'pieces', 'points') or a.get(k) == b.get(k): continue
+        w = PART_WORDS.get(k, 'прочее')
+        if w not in out: out.append(w)
+    return out
+
+def journal(pid, uid, prev, old, new, js, km, why, kind, now):
     c = db()
-    if create: c.execute('INSERT INTO projects(id,user_id,title,json,card,created,updated) VALUES(?,?,?,?,?,?,?)', (pid, uid, proj['meta']['title'], js, card, now, now))
-    else: c.execute('UPDATE projects SET title=?, json=?, card=?, updated=? WHERE id=? AND user_id=?', (proj['meta']['title'], js, card, now, pid, uid))
+    last = c.execute('SELECT id, user_id, ts, t0, kind FROM revisions WHERE project_id=? ORDER BY id DESC LIMIT 1', (pid,)).fetchone()
+    if kind == 'base':
+        c.execute('INSERT INTO revisions(project_id,user_id,ts,t0,kind,what,km,data) VALUES(?,?,?,?,?,?,?,?)', (pid, uid, now, now, 'base', json.dumps([why]), km, pack(js))); c.commit(); return
+    if old is None: old = json.loads(prev['json']) if prev else {}
+    if not last and prev:      # поход старше журнала: его прежнее состояние — первая версия
+        oc = card_of(old)
+        c.execute('INSERT INTO revisions(project_id,user_id,ts,t0,kind,what,km,data) VALUES(?,?,?,?,?,?,?,?)',
+                  (pid, prev['by'] or prev['user_id'], prev['updated'], prev['updated'], 'base', json.dumps(['как было до журнала']), oc.get('km'), pack(prev['json'])))
+        last = c.execute('SELECT id, user_id, ts, t0, kind FROM revisions WHERE project_id=? ORDER BY id DESC LIMIT 1', (pid,)).fetchone()
+    if kind == 'auto' and last and last['kind'] == 'auto' and last['user_id'] == uid and now - last['ts'] < REV_GAP and now - last['t0'] < REV_SPAN:
+        b = c.execute('SELECT data FROM revisions WHERE project_id=? AND id<? ORDER BY id DESC LIMIT 1', (pid, last['id'])).fetchone()
+        what = describe(unpack(b['data']) if b else old, new)
+        if not what: c.execute('DELETE FROM revisions WHERE id=?', (last['id'],))      # правки вернулись к прежнему — версии нет
+        else: c.execute('UPDATE revisions SET ts=?, what=?, km=?, data=? WHERE id=?', (now, json.dumps(what, ensure_ascii=False), km, pack(js), last['id']))
+    else:
+        what = ([why] if why else []) + (describe(old, new) if kind != 'restore' else [])
+        if not what: return
+        c.execute('INSERT INTO revisions(project_id,user_id,ts,t0,kind,what,km,data) VALUES(?,?,?,?,?,?,?,?)',
+                  (pid, uid, now, now, kind, json.dumps(what, ensure_ascii=False), km, pack(js)))
+    c.execute('DELETE FROM revisions WHERE project_id=? AND id NOT IN (SELECT id FROM revisions WHERE project_id=? ORDER BY id DESC LIMIT ?)', (pid, pid, REV_KEEP))
     c.commit()
 
 def changelog():
@@ -392,6 +492,7 @@ class H(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header('Content-Type', ctype); self.send_header('Content-Length', str(len(body)))
         self.send_header('Cache-Control', cache or 'no-store'); self.send_header('X-Content-Type-Options', 'nosniff')
+        if getattr(self, '_rev', None): self.send_header('X-Nitka-Rev', self._rev)      # версия похода — браузер шлёт её обратно при сохранении
         for k, v in h.items(): self.send_header(k, v)
         self.end_headers()
         if self.command != 'HEAD': self.wfile.write(body)
@@ -430,16 +531,29 @@ class H(BaseHTTPRequestHandler):
         if not u or not db().execute('SELECT 1 FROM users WHERE id=?', (u,)).fetchone(): raise Err(401, 'Нужно войти.')
         return u
 
-    def project(self, pid):
+    def project(self, pid, need=None):
+        """Поход и права на него: владелец, участник (правка/просмотр) или ссылка для просмотра (?s=…, без входа)."""
         if not re.fullmatch(r'[0-9a-f]{12}', pid): raise Err(404, 'Нет такого похода.')
-        uid = self.need_user(); proj, row = load_project(pid, uid)
-        if not proj: raise Err(404, 'Нет такого похода.')
-        return uid, proj, row
+        need = need or ('view' if self.command in ('GET', 'HEAD') else 'edit')
+        uid = self.uid()
+        if uid and not db().execute('SELECT 1 FROM users WHERE id=?', (uid,)).fetchone(): uid = None
+        role = access(pid, uid)
+        if not role and share_of(self._q.get('s'))[0] == pid: role = 'view'      # ссылка даёт смотреть; править — только войдя
+        if not role:
+            if not uid: raise Err(401, 'Нужно войти.')
+            raise Err(404, 'Нет такого похода.')
+        if RANK[role] < RANK[need]: raise Err(403, 'Этот поход тебе открыли только для просмотра.' if role == 'view' else 'Это может только владелец похода.')
+        row = db().execute('SELECT * FROM projects WHERE id=?', (pid,)).fetchone()
+        self._uid, self._role, self._rev = uid, role, rev_of(row['updated'])
+        return uid, json.loads(row['json']), row
+
+    def save(self, pid, proj, why=None, kind=None, old=None):
+        self._rev = save_project(pid, self._uid, proj, why=why, kind=kind or ('op' if why else 'auto'), old=old)
 
     def handle_one(self):
-        self._body = None
+        self._body = None; self._rev = None; self._q = {}
         try:
-            u = urllib.parse.urlsplit(self.path); path = urllib.parse.unquote(u.path); q = dict(urllib.parse.parse_qsl(u.query))
+            u = urllib.parse.urlsplit(self.path); path = urllib.parse.unquote(u.path); q = dict(urllib.parse.parse_qsl(u.query)); self._q = q
             self.route(self.command if self.command != 'HEAD' else 'GET', path, q)
         except Err as e:
             self.send(e.code, dict(error=e.msg))
@@ -546,7 +660,12 @@ class H(BaseHTTPRequestHandler):
                              cache='public, max-age=300')
         if a == ['projects'] and m == 'GET':
             uid = self.need_user()
-            rows = db().execute('SELECT id,title,card,created,updated FROM projects WHERE user_id=? ORDER BY updated DESC', (uid,)).fetchall()
+            rows = db().execute('''SELECT p.id, p.title, p.card, p.created, p.updated, 'owner' AS role, NULL AS owner,
+                                     (SELECT COUNT(*) FROM members m WHERE m.project_id=p.id) AS nmem FROM projects p WHERE p.user_id=?
+                                   UNION ALL
+                                   SELECT p.id, p.title, p.card, p.created, p.updated, m.role, u.name, 0 FROM members m JOIN projects p ON p.id=m.project_id
+                                     LEFT JOIN users u ON u.id=p.user_id WHERE m.user_id=?
+                                   ORDER BY updated DESC''', (uid, uid)).fetchall()
             out = []
             for r in rows:
                 if '"geo"' not in (r['card'] or ''):          # карточка старого образца — пересчитываем один раз
@@ -555,9 +674,24 @@ class H(BaseHTTPRequestHandler):
                     db().execute('UPDATE projects SET card=? WHERE id=?', (card, r['id'])); db().commit()
                     r = dict(r, card=card)
                 st = build_status(r['id'])
-                out.append(dict(id=r['id'], title=r['title'], updated=r['updated'], card=json.loads(r['card'] or '{}'),
+                out.append(dict(id=r['id'], title=r['title'], updated=r['updated'], card=json.loads(r['card'] or '{}'), role=r['role'], owner=r['owner'], members=r['nmem'],
                                 build=dict(state=st.get('state'), expires=st.get('expires'), n=sum(1 for s in st.get('sheets', []) if s.get('state') == 'ok'))))
             return self.send(200, dict(projects=out))
+        if len(a) >= 2 and a[0] == 's':      # ссылка «поделиться»
+            pid, role = share_of(a[1])
+            if not pid: raise Err(404, 'Ссылка больше не работает — попроси новую у того, кто ею поделился.')
+            pr = db().execute('SELECT p.title, p.card, u.name FROM projects p LEFT JOIN users u ON u.id=p.user_id WHERE p.id=?', (pid,)).fetchone()
+            if not pr: raise Err(404, 'Этого похода больше нет.')
+            uid = self.uid(); have = access(pid, uid) if uid else None
+            if len(a) == 2 and m == 'GET':
+                return self.send(200, dict(pid=pid, role=role, title=pr['title'], owner=pr['name'] or '', card=json.loads(pr['card'] or '{}'), have=have))
+            if a[2:] == ['join'] and m == 'POST':
+                uid = self.need_user(); have = access(pid, uid)
+                if have and RANK[have] >= RANK[role]: return self.send(200, dict(pid=pid, role=have))
+                db().execute('INSERT INTO members(project_id,user_id,role,added) VALUES(?,?,?,?) ON CONFLICT(project_id,user_id) DO UPDATE SET role=excluded.role',
+                             (pid, uid, role, time.time())); db().commit()
+                return self.send(200, dict(pid=pid, role=role))
+            raise Err(404, 'Нет такого адреса.')
         if a == ['projects'] and m == 'POST':
             uid = self.need_user(); d = self.json()
             if db().execute('SELECT COUNT(*) FROM projects WHERE user_id=?', (uid,)).fetchone()[0] >= 300: raise Err(400, 'Слишком много походов — удалите ненужные.')
@@ -567,18 +701,74 @@ class H(BaseHTTPRequestHandler):
             save_project(pid, uid, proj, create=True)
             return self.send(200, dict(id=pid))
         if len(a) >= 2 and a[0] == 'projects':
-            uid, proj, row = self.project(a[1]); pid = a[1]; sub = a[2] if len(a) > 2 else ''
-            if not sub and m == 'GET': return self.send(200, dict(project=for_client(proj), build=build_status(pid), updated=row['updated']))
+            pid = a[1]; sub = a[2] if len(a) > 2 else ''
+            need = ('view' if m in ('GET', 'HEAD') and sub not in ('share', 'history', 'route') else 'owner' if sub == 'share' and m == 'POST'
+                    else 'view' if (not sub and m == 'DELETE') or sub == 'copy' else 'edit')
+            uid, proj, row = self.project(pid, need); role = self._role
+            if not sub and m == 'GET':
+                shared = role != 'owner' or bool(db().execute('SELECT 1 FROM members WHERE project_id=? LIMIT 1', (pid,)).fetchone())
+                return self.send(200, dict(project=for_client(proj), build=build_status(pid), updated=row['updated'], rev=self._rev, role=role,
+                                           owner=user_name(row['user_id']), shared=shared))
+            if sub == 'rev' and m == 'GET':      # не поменял ли поход кто-то ещё (общий поход открыт у нескольких)
+                return self.send(200, dict(rev=self._rev, by=user_name(row['by']), mine=row['by'] == uid))
             if not sub and m == 'PUT':
-                proj = merge_client(proj, self.json()); save_project(pid, uid, proj)
-                return self.send(200, dict(ok=True, card=card_of(proj)))
+                want = self.headers.get('X-Nitka-Rev')
+                if want and want != self._rev:      # пока человек правил, поход поменяли — его старая копия затёрла бы чужие правки
+                    who = user_name(row['by'])
+                    return self.send(409, dict(conflict=True, by=who, error=('Поход только что поменяли в другой вкладке' if row['by'] == uid else f'Поход только что поменял(а) {who}')
+                                               + ' — твоя последняя правка не сохранилась. Показываю свежую версию, повтори её.'))
+                old = json.loads(row['json'])
+                proj = merge_client(proj, self.json()); self.save(pid, proj, old=old)
+                return self.send(200, dict(ok=True, card=card_of(proj), rev=self._rev))
             if not sub and m == 'DELETE':
-                db().execute('DELETE FROM projects WHERE id=? AND user_id=?', (pid, uid)); db().commit()
+                if role != 'owner':      # участник убирает чужой поход из своего списка
+                    db().execute('DELETE FROM members WHERE project_id=? AND user_id=?', (pid, uid)); db().commit()
+                    return self.send(200, dict(ok=True, left=True))
+                c = db()
+                for t in ('projects', 'members', 'shares', 'revisions'): c.execute(f'DELETE FROM {t} WHERE {"id" if t == "projects" else "project_id"}=?', (pid,))
+                c.commit()
                 if pid not in ACTIVE: shutil.rmtree(render_dir(pid), ignore_errors=True)
                 return self.send(200, dict(ok=True))
             if sub == 'copy' and m == 'POST':
+                if not uid: raise Err(401, 'Нужно войти.')
                 nid = secrets.token_hex(6); proj['meta']['title'] = (proj['meta'].get('title') or '') + ' (копия)'
-                save_project(nid, uid, proj, create=True); return self.send(200, dict(id=nid))
+                save_project(nid, uid, proj, create=True, why='копия похода'); return self.send(200, dict(id=nid))
+            if sub == 'share' and m == 'GET':
+                return self.send(200, share_state(pid, role))
+            if sub == 'share' and m == 'POST':      # только владелец: ссылки и участники
+                d = self.json(); c = db(); act = d.get('action')
+                if act == 'link':
+                    r_ = d.get('role') if d.get('role') in ('view', 'edit') else 'view'; op = d.get('op')
+                    if op in ('off', 'reset'): c.execute('DELETE FROM shares WHERE project_id=? AND role=?', (pid, r_))
+                    if op in ('on', 'reset') and not c.execute('SELECT 1 FROM shares WHERE project_id=? AND role=?', (pid, r_)).fetchone():
+                        c.execute('INSERT INTO shares(token,project_id,role,created) VALUES(?,?,?,?)', (secrets.token_urlsafe(12), pid, r_, time.time()))
+                elif act == 'member':
+                    try: who = int(d.get('user'))
+                    except (TypeError, ValueError): raise Err(400, 'Не понял, кого.')
+                    if d.get('role') == 'remove': c.execute('DELETE FROM members WHERE project_id=? AND user_id=?', (pid, who))
+                    elif d.get('role') in ('view', 'edit'): c.execute('UPDATE members SET role=? WHERE project_id=? AND user_id=?', (d['role'], pid, who))
+                else: raise Err(400, 'Неизвестное действие.')
+                c.commit(); return self.send(200, share_state(pid, role))
+            if sub == 'history' and m == 'GET' and len(a) == 3:      # журнал: версии похода
+                rows = db().execute('''SELECT r.id, r.ts, r.t0, r.kind, r.what, r.km, r.user_id, u.name FROM revisions r LEFT JOIN users u ON u.id=r.user_id
+                                       WHERE r.project_id=? ORDER BY r.id DESC LIMIT ?''', (pid, REV_KEEP)).fetchall()
+                return self.send(200, dict(items=[dict(id=r['id'], ts=r['ts'], t0=r['t0'], kind=r['kind'], what=json.loads(r['what'] or '[]'), km=r['km'],
+                                                       who=r['name'] or '', me=r['user_id'] == uid) for r in rows], keep=REV_KEEP))
+            if sub == 'history' and m == 'GET' and len(a) == 4:      # версия — на карте: нитки и точки
+                r = db().execute('SELECT data FROM revisions WHERE id=? AND project_id=?', (a[3], pid)).fetchone()
+                if not r: raise Err(404, 'Этой версии уже нет.')
+                v = unpack(r['data'])
+                lines = [dict(role=p.get('role'), day=p.get('day'), pts=[[round(q[0], 5), round(q[1], 5)] for q in p['pts'][::max(1, len(p['pts']) // 400)]])
+                         for p in v.get('pieces', []) if p.get('role') != 'skip' and p.get('pts')]
+                return self.send(200, dict(lines=lines, points=[dict(lat=q['lat'], lon=q['lon'], type=q.get('type'), name=q.get('name', '')) for q in v.get('points', []) if q.get('type') in ('camp', 'pass', 'peak')]))
+            if sub == 'history' and m == 'POST':      # вернуть поход к версии — сам возврат тоже версия, его можно отменить
+                try: rid = int(self.json().get('id'))
+                except (TypeError, ValueError): raise Err(400, 'Не указана версия.')
+                r = db().execute('SELECT data, ts FROM revisions WHERE id=? AND project_id=?', (rid, pid)).fetchone()
+                if not r: raise Err(404, 'Этой версии уже нет.')
+                v = unpack(r['data']); old = json.loads(row['json'])
+                self.save(pid, v, why=f'возврат к версии от @{int(r["ts"])}', kind='restore', old=old)
+                return self.send(200, dict(project=for_client(v), rev=self._rev, msg='Поход вернулся к выбранной версии. Передумал — верни следующую версию в журнале.'))
             if sub == 'import' and m == 'POST':
                 if 'json' in (self.headers.get('Content-Type') or ''):
                     link = str(self.json().get('link') or '').strip()
@@ -597,7 +787,7 @@ class H(BaseHTTPRequestHandler):
                 try: tzq = float(q['tz']) if 'tz' in q else None      # пояс браузера: им считается время, если у похода его ещё нет
                 except ValueError: tzq = None
                 info = classify.merge_import(proj, layers, name, as_role, tzq)
-                save_project(pid, uid, proj)
+                self.save(pid, proj, why=f'загружено: {name}')
                 return self.send(200, dict(project=for_client(proj), info=info))
             if sub == 'variants' and m == 'POST':      # варианты маршрута: сделать из кусков, нарисовать, объединить, отделить
                 d = self.json(); act = d.get('action'); kind = d.get('kind') if d.get('kind') in classify.VAR_ROLES else 'alt'
@@ -636,13 +826,13 @@ class H(BaseHTTPRequestHandler):
                 else: raise Err(400, 'Неизвестное действие.')
                 used = {p.get('var') for p in proj['pieces'] if p.get('role') in classify.VAR_ROLES}
                 proj['variants'] = [v for v in proj.get('variants', []) if v['id'] in used]
-                save_project(pid, uid, proj)
+                self.save(pid, proj, why=msg.lower() if len(msg) < 60 else 'варианты маршрута')
                 return self.send(200, dict(project=for_client(proj), msg=msg))
             if sub == 'day-radial' and m == 'POST':      # весь день — радиальный выход (куски склеиваются в один)
                 try: day = int(self.json().get('day'))
                 except (TypeError, ValueError): raise Err(400, 'Не указан день.')
                 r = classify.day_radial(proj, day)
-                if r['ok']: save_project(pid, uid, proj)
+                if r['ok']: self.save(pid, proj, why=f'день {day} — радиалка')
                 return self.send(200, dict(project=for_client(proj), **r))
             if sub == 'check' and m == 'GET':      # что не так с треком: выбросы, разрывы
                 return self.send(200, dict(items=trackfix.check(proj)))
@@ -652,7 +842,9 @@ class H(BaseHTTPRequestHandler):
                 r = (trackfix.replace(proj, d) if act == 'replace' else trackfix.replace_many(proj, d) if act == 'replace_many'
                      else trackfix.accept(proj, d) if act == 'ok'
                      else trackfix.untangle(proj, d.get('piece'), d.get('i0'), d.get('i1'), d.get('piece2')) if act == 'untangle' else trackfix.edit(proj, d))
-                if r['ok']: save_project(pid, uid, proj)
+                TE = {'replace': 'редактор трека', 'replace_many': 'редактор трека', 'ok': '«это не ошибка» в проверке трека', 'untangle': 'спрямлены клубки',
+                      'cut': 'вырезан выброс', 'redraw': 'перерисован участок', 'undo': 'отменена правка трека', 'reset': 'трек — как при загрузке'}
+                if r['ok']: self.save(pid, proj, why=TE.get(act, 'правка трека'))
                 return self.send(200, dict(project=for_client(proj), **r))
             if sub == 'route' and m == 'GET':      # путь по тропам между двумя точками (BRouter) — для перерисовки и вариантов
                 try: a = [float(x) for x in q['a'].split(',')]; b = [float(x) for x in q['b'].split(',')]
@@ -670,14 +862,14 @@ class H(BaseHTTPRequestHandler):
                 text = str(self.json().get('text') or '')[:60000]
                 return self.send(200, chrono.place(proj, text))
             if sub == 'source-delete' and m == 'POST':
-                classify.remove_source(proj, str(self.json().get('id') or '')); save_project(pid, uid, proj)
+                classify.remove_source(proj, str(self.json().get('id') or '')); self.save(pid, proj, why='убран файл')
                 return self.send(200, dict(project=for_client(proj)))
             if sub == 'cut' and m == 'POST':
                 d = self.json()
                 try: lat, lon = float(d['lat']), float(d['lon'])
                 except (KeyError, TypeError, ValueError): raise Err(400, 'Не понял, где резать.')
                 r = classify.cut_piece(proj, str(d.get('piece') or ''), lat, lon)
-                if r['ok']: save_project(pid, uid, proj)
+                if r['ok']: self.save(pid, proj, why='нитка разрезана')
                 return self.send(200, dict(project=for_client(proj), **r))
             if sub == 'suggest' and m == 'POST':
                 what = str(self.json().get('what') or '')
@@ -688,11 +880,11 @@ class H(BaseHTTPRequestHandler):
                 raise Err(400, 'Не понял, что подсказать.')
             if sub == 'chain-order' and m == 'POST':
                 n = classify.chain_order(proj)
-                if n: save_project(pid, uid, proj)
+                if n: self.save(pid, proj, why='куски по ходу маршрута')
                 return self.send(200, dict(project=for_client(proj), changed=n))
             if sub == 'split-by-camps' and m == 'POST':
                 r = classify.split_by_camps(proj)
-                if r['ok']: save_project(pid, uid, proj)
+                if r['ok']: self.save(pid, proj, why='нитка разрезана по ночёвкам')
                 return self.send(200, dict(project=for_client(proj), **r))
             if sub == 'build' and m == 'POST':
                 d = self.json()
@@ -713,7 +905,10 @@ class H(BaseHTTPRequestHandler):
         try: layer, z, x, y = a[0], int(a[1]), int(a[2]), int(a[3].split('.')[0])
         except Exception: raise Err(404, 'нет')
         if layer not in TILE_LAYERS or not 3 <= z <= TILE_LAYERS[layer]: raise Err(404, 'нет')
-        uid = self.need_user(); now = time.time()
+        uid = self.uid(); now = time.time()
+        if not uid or not db().execute('SELECT 1 FROM users WHERE id=?', (uid,)).fetchone():
+            if not share_of((q or {}).get('s'))[0]: raise Err(401, 'Нужно войти.')
+            uid = 's:' + q['s']      # смотрят по ссылке — свой счётчик запросов
         w = TILE_RATE.get(uid)
         if not w or now - w[0] > 600: w = TILE_RATE[uid] = [now, 0]
         w[1] += 1

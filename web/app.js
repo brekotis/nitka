@@ -24,8 +24,8 @@ function loadOn(msg) {
   if (lastBtn && Date.now() - lastBtnAt < 600 && lastBtn.isConnected) lastBtn.classList.add('loading');      // кнопка, которую только что нажали, показывает, что работает
   loadPaint(); return () => { const i = LOADS.indexOf(t); if (i >= 0) LOADS.splice(i, 1); loadPaint(); };
 }
-async function api(method, url, body, raw, msg) {
-  const o = { method, headers: {}, credentials: 'same-origin' };
+async function api(method, url, body, raw, msg, headers) {
+  const o = { method, headers: { ...(headers || {}) }, credentials: 'same-origin' };
   if (raw) o.body = body; else if (body !== undefined) { o.body = JSON.stringify(body); o.headers['Content-Type'] = 'application/json'; }
   const off = msg === false ? null : loadOn(msg);
   try {
@@ -34,7 +34,10 @@ async function api(method, url, body, raw, msg) {
     let d = {};
     try { d = await r.json(); } catch (e) { /* пусто */ }
     if (r.status === 401 && S.user) { S.user = null; go('#/'); render(); }
-    if (!r.ok) throw new Error(d.error || `Ошибка ${r.status}`);
+    if (!r.ok) { const er = new Error(d.error || `Ошибка ${r.status}`); er.status = r.status; er.data = d; throw er; }
+    // версия похода: только вместе с его состоянием (сохранение или поход целиком) — иначе можно затереть чужие правки
+    const rv = r.headers.get('X-Nitka-Rev');
+    if (rv && S.pid && url.startsWith(`/api/projects/${S.pid}`) && !/\/rev(\?|$)/.test(url) && (d.project || d.rev)) S.rev = rv;
     return d;
   } finally { off && off(); }
 }
@@ -50,6 +53,8 @@ const I = {
   dl: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M12 4v11M7 11l5 5 5-5M5 20h14"/></svg>',
   dots: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2.2"/><circle cx="12" cy="12" r="2.2"/><circle cx="19" cy="12" r="2.2"/></svg>',
   back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 5l-7 7 7 7"/></svg>',
+  share: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5.5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="18.5" r="2.6"/><path d="M8.3 10.8l7.4-4.1M8.3 13.2l7.4 4.1"/></svg>',
+  clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 12a8.5 8.5 0 1 0 2.5-6"/><path d="M3 4v4h4M12 7.5V12l3 2"/></svg>',
   eye: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>',
   eyeoff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 4l16 16M9.9 5.3A9.6 9.6 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3.2 4M6.2 6.7C3.5 8.600 2 12 2 12s3.600 7 10 7c1.500 0 2.900-.4 4-1"/></svg>',
   up: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 14l6-6 6 6"/></svg>',
@@ -85,16 +90,20 @@ function go(h) { if (location.hash !== h) location.hash = h; else route(); }
 window.addEventListener('hashchange', route);
 async function route() {
   const m = location.hash.match(/^#\/p\/([0-9a-f]{12})(?:\/(\w+))?/);
+  const sh = location.hash.match(/^#\/s\/([\w-]{10,40})/);
+  if (sh) return openShare(sh[1]);
+  if (S.share) { S.share = null; S.pid = null; S.proj = null; }      // ушли со страницы просмотра по ссылке
+  S.invite = null;
   if (!S.user) return render();
   if (needOrigin() && !S.proj) return renderOrigin();      // только на входе, не посреди работы в редакторе
   if (m) {
     const step = STEPS.some(s => s[0] === m[2]) ? m[2] : 'tracks';
     if (S.pid !== m[1]) { await openProject(m[1], step); return; }
-    if (S.step !== step) { S.step = step; setMode(null); paintEditor(); }
+    if (S.step !== step) { S.step = step; setMode(null); if (S.hist) closeHist(true); paintEditor(); }
     return;
   }
   await flush();
-  S.pid = null; S.proj = null; stopPoll(); destroyMap();
+  S.pid = null; S.proj = null; S.hist = null; stopPoll(); clearInterval(revT); destroyMap();
   if (location.hash.startsWith('#/admin') && S.user.admin) return renderAdmin();
   await loadProjects(); render();
 }
@@ -201,6 +210,7 @@ function renderLogin() {
       <div class="club">турклуб «Восхождение»</div>
       <h1>Нит<i>ка</i></h1>
       <p class="lead">Карты и высотные профили для отчёта о походе — из твоего трека, за пару минут.</p>
+      ${S.invite ? `<div class="invite"><b>${esc(S.invite.owner)}</b> ${S.invite.role === 'edit' ? 'зовёт тебя править' : 'делится походом'} «${esc(S.invite.title)}». Войди — и поход появится в твоём списке${S.invite.role === 'edit' ? ', править будете вместе' : ''}.</div>` : ''}
       <form id="login">
         <label class="field"><span>Как тебя зовут?</span><input name="name" type="text" placeholder="имя, ник или телефон" autocomplete="username" ${isPhone() ? "" : "autofocus"} maxlength="40" value="${esc(localStorage.nitkaName || '')}"></label>
         ${S.cfg.need_code ? '<label class="field"><span>Кодовое слово клуба</span><input name="code" type="text" autocomplete="off"></label>' : ''}
@@ -276,13 +286,14 @@ function renderHome() {
       <button class="card new" data-a="new"><div><span class="plus">+</span>Новый поход</div></button>
       ${P.map((p, i) => { const c = p.card || {}; const b = p.build || {};
         const left = b.expires ? Math.max(0, Math.ceil((b.expires * 1000 - Date.now()) / 864e5)) : 0;
+        const shTag = p.role && p.role !== 'owner' ? `<span class="tag share">${p.role === 'edit' ? 'правишь' : 'смотришь'} · ${esc(p.owner || '')}</span>` : p.members ? `<span class="tag share">общий · ${p.members + 1} ${plural(p.members + 1, 'человек', 'человека', 'человек')}</span>` : '';
         const st = b.state === 'done' && b.n ? `<span class="tag ok">карты готовы · ещё ${left} ${plural(left, 'день', 'дня', 'дней')}</span>` : (b.state === 'running' || b.state === 'queued' ? '<span class="tag sun">собирается…</span>' : (c.pieces ? '<span class="tag">черновик</span>' : '<span class="tag warn">нет трека</span>'));
         return `<div class="card" style="animation-delay:${Math.min(i, 8) * 45}ms" data-a="open" data-id="${p.id}" tabindex="0" role="button">
           <div class="shape">${thumbSvg(c)}</div>
           <button class="icon-btn more" data-a="menu" data-id="${p.id}" title="Ещё">${I.dots}</button>
           <div class="info"><h3>${esc(p.title)}</h3>
             <div class="meta">${[c.area, c.kind, c.ndays ? `${c.ndays} ${plural(c.ndays, 'день', 'дня', 'дней')}` : '', c.km ? `${km(c.km)} км` : '', fmtDates(c)].filter(Boolean).map(esc).map(x => `<span>${x}</span>`).join('')}</div>
-            <div>${st}</div></div></div>`; }).join('')}
+            <div class="tags">${st}${shTag}</div></div></div>`; }).join('')}
     </div></main>
   <button type="button" class="mascot" id="mascot" aria-label="Турист"><img src="/static/img/logo.png" alt=""></button><div class="bubble mbubble" id="mbubble" hidden></div>`;
   homeLive();
@@ -386,21 +397,187 @@ async function flush() {
   if (!dirtyFlag || !S.proj) return;
   dirtyFlag = false;
   const body = { ...S.proj, pieces: S.proj.pieces.map(({ pts, ...p }) => p) };
-  saving = api('PUT', `/api/projects/${S.pid}`, body, false, false).then(() => { if (!dirtyFlag) setSaved('', 'сохранено'); }, e => { dirtyFlag = true; setSaved('bad', 'не сохранилось'); fail(e); }).finally(() => { saving = null; });
+  saving = api('PUT', `/api/projects/${S.pid}`, body, false, false, S.rev ? { 'X-Nitka-Rev': S.rev } : undefined)
+    .then(() => { if (!dirtyFlag) setSaved('', 'сохранено'); }, e => {
+      if (e.status === 409) { dirtyFlag = false; setSaved('', 'сохранено'); setTimeout(() => refreshProject(e.message, true), 0); return; }
+      dirtyFlag = true; setSaved('bad', 'не сохранилось'); fail(e);
+    }).finally(() => { saving = null; });
   await saving;
 }
 window.addEventListener('beforeunload', e => { if (dirtyFlag) { flush(); e.preventDefault(); e.returnValue = ''; } });
 async function openProject(pid, step) {
   await flush();
   try {
-    const d = await api('GET', `/api/projects/${pid}`, undefined, false, 'Открываю поход…');
-    S.pid = pid; S.proj = d.project; S.build = d.build; S.step = step; S.selPiece = S.selPoint = null; S.filter = 'all'; S.folder = ''; S.q = ''; S.lastInfo = null; S.mode = null; S.selBand = null; S.bandA = null; S.ptab = 'points';
+    const d = await api('GET', `/api/projects/${pid}${S.share ? '?' + sq() : ''}`, undefined, false, 'Открываю поход…');
+    S.pid = pid; S.proj = d.project; S.build = d.build; S.step = step; S.rev = d.rev; S.role = d.role; S.owner = d.owner; S.shared = d.shared; S.hist = null; S.selPiece = S.selPoint = null; S.filter = 'all'; S.folder = ''; S.q = ''; S.lastInfo = null; S.mode = null; S.selBand = null; S.bandA = null; S.ptab = 'points';
     if (!S.proj.pieces.length) S.step = 'tracks';
     destroyAtlas(); renderEditor();
     if (['running', 'queued'].includes(S.build.state)) startPoll();
-  } catch (e) { fail(e); S.pid = null; go('#/'); }
+    startRevPoll();
+  } catch (e) { fail(e); S.pid = null; S.share = null; go('#/'); }
+}
+// Ссылка «поделиться»: вошедший — сразу в поход (он появляется в его списке); без входа — смотреть можно, править — войдя
+async function openShare(tok) {
+  let info;
+  try { info = await api('GET', `/api/s/${tok}`, undefined, false, 'Открываю ссылку…'); } catch (e) { fail(e); location.replace('#/'); return; }
+  S.invite = { ...info, tok };
+  if (S.user) {
+    try {
+      const r = await api('POST', `/api/s/${tok}/join`, undefined, false, false);
+      if (!info.have) toast(r.role === 'edit' ? `«${info.title}» теперь в твоих походах — правьте вместе` : `«${info.title}» теперь в твоих походах — для просмотра`);
+      S.invite = null; S.share = null; location.replace(`#/p/${r.pid}/tracks`);
+    } catch (e) { fail(e); location.replace('#/'); }
+    return;
+  }
+  if (info.role === 'view') { S.share = tok; S.pid = null; return openProject(info.pid, 'tracks'); }
+  S.proj = null; renderLogin();
+}
+// Общий поход открыт у нескольких: раз в 20 секунд спрашиваем, не поменял ли его кто-то, и показываем свежую версию
+let revT = null;
+function startRevPoll() {
+  clearInterval(revT); if (!S.shared) return;
+  revT = setInterval(async () => {
+    if (!S.pid || !S.proj) return clearInterval(revT);
+    if (document.hidden || dirtyFlag || saving || S.mode || (ED && ED.active()) || $('.veil')) return;
+    try {
+      const was = S.rev, r = await api('GET', `/api/projects/${S.pid}/rev${S.share ? '?' + sq() : ''}`, undefined, false, false);
+      if (r.rev !== was && S.rev === was) refreshProject(r.mine ? 'Поход поменялся в другой вкладке — показываю свежую версию' : `Поход обновился — правки от ${r.by}`);
+    } catch (e) { /* подождём */ }
+  }, 20000);
+}
+async function refreshProject(msg, err) {
+  try {
+    const d = await api('GET', `/api/projects/${S.pid}${S.share ? '?' + sq() : ''}`, undefined, false, false);
+    S.proj = d.project; S.build = d.build; S.rev = d.rev; S.role = d.role; S.shared = d.shared;
+    if (S.mode && S.mode !== 'editor') setMode(null);
+    if (S.selPiece && !pieceById(S.selPiece)) S.selPiece = null;
+    if (S.selPoint && !P().points.some(q => q.id === S.selPoint)) S.selPoint = null;
+    const t = $('.top .title'); if (t && document.activeElement !== t) t.value = P().meta.title;
+    document.title = (P().meta.title || 'Поход') + ' — Нитка';
+    paintPanel(); drawMap(); if (msg) toast(msg, err);
+  } catch (e) { fail(e); }
 }
 const P = () => S.proj;
+
+// ---------------------------------------------------------------- поделиться: ссылки и у кого есть доступ
+const shareUrl = t => `${location.origin}/#/s/${t}`;
+function shareHtml(st) {
+  const row = (role, title, text) => { const t = st.links[role];
+    return `<div class="shr"><div class="shh"><b>${title}</b><div class="hint">${text}</div></div>
+      ${t ? `<div class="shl"><input readonly value="${esc(shareUrl(t))}" data-selall aria-label="Ссылка"><button class="btn sm go" data-copy="${esc(shareUrl(t))}">Копировать</button>${navigator.share && isPhone() ? `<button class="btn sm" data-native="${esc(shareUrl(t))}">Отправить…</button>` : ''}
+        ${st.manage ? `<button class="btn sm ghost" data-op="reset" data-r="${role}" title="Старая ссылка перестанет работать, у кого уже есть доступ — останется">Сменить</button><button class="btn sm ghost" data-op="off" data-r="${role}" title="По ссылке больше нельзя будет войти; у кого уже есть доступ — останется">Отключить</button>` : ''}</div>`
+        : st.manage ? `<div><button class="btn sm" data-op="on" data-r="${role}">Создать ссылку</button></div>` : '<div class="hint">Ссылки нет — её может создать владелец.</div>'}</div>`; };
+  return `<h2>Поделиться походом</h2>
+    ${row('view', 'Смотреть', 'Нитка, дни, ночёвки, перевалы и готовые карты — без правки. Входить в «Нитку» не нужно: ссылку можно кинуть в чат группы.')}
+    ${row('edit', 'Править вместе', 'Человек войдёт в «Нитку» под своим именем, и поход появится у него в списке. Править можно одновременно: «Нитка» подтянет чужие правки и не даст их затереть. Всё видно в «Истории», любое изменение можно откатить.')}
+    <div class="shm"><h3>У кого есть доступ</h3>
+      <div class="mrow"><b>${esc(st.owner)}</b><span class="tag">владелец</span></div>
+      ${st.members.map(m => `<div class="mrow"><b>${esc(m.name)}</b>${st.manage ? `<span class="seg sm"><button class="${m.role === 'view' ? 'on' : ''}" data-mem="${m.id}" data-role="view">смотрит</button><button class="${m.role === 'edit' ? 'on' : ''}" data-mem="${m.id}" data-role="edit">правит</button></span><button class="btn sm ghost" data-mem="${m.id}" data-role="remove">Убрать</button>` : `<span class="tag">${m.role === 'edit' ? 'правит' : 'смотрит'}</span>`}</div>`).join('') || '<div class="hint">Пока никого — отправь ссылку.</div>'}
+      ${st.manage ? '' : `<div class="hint">Ссылками и доступом управляет ${esc(st.owner)}.</div>`}</div>
+    <div class="acts"><button class="btn go" data-x>Готово</button></div>`;
+}
+async function openShareBox() {
+  await flush();
+  let st; try { st = await api('GET', `/api/projects/${S.pid}/share`, undefined, false, 'Открываю…'); } catch (e) { return fail(e); }
+  modal(shareHtml(st), (v, close) => {
+    const box = $('.modal', v); box.classList.add('sharebox');
+    const upd = n => { st = n; box.innerHTML = shareHtml(st); S.shared = st.members.length > 0; $('.tbtn[data-a="share"]') && $('.tbtn[data-a="share"]').classList.toggle('on', S.shared || Object.keys(st.links).length > 0); startRevPoll(); };
+    v.addEventListener('click', async e => {
+      const b = e.target.closest('button,input'); if (!b) return;
+      if (b.dataset.x !== undefined) return close();
+      if (b.dataset.selall !== undefined) return b.select();
+      if (b.dataset.copy) { try { await navigator.clipboard.writeText(b.dataset.copy); toast('Ссылка скопирована'); } catch (er) { const i = $('input', b.parentElement); i && i.select(); toast('Скопируй ссылку вручную — она выделена', true); } return; }
+      if (b.dataset.native) { navigator.share({ title: P().meta.title, url: b.dataset.native }).catch(() => {}); return; }
+      try {
+        if (b.dataset.op) {
+          const go_ = async () => upd(await api('POST', `/api/projects/${S.pid}/share`, { action: 'link', role: b.dataset.r, op: b.dataset.op }, false, false));
+          if (b.dataset.op === 'on') return go_();
+          return confirmBox(b.dataset.op === 'reset' ? 'Сменить ссылку?' : 'Отключить ссылку?', 'Старая ссылка перестанет работать. Те, кто уже вошёл по ней, доступ не потеряют — убрать их можно ниже.', b.dataset.op === 'reset' ? 'Сменить' : 'Отключить', go_);
+        }
+        if (b.dataset.mem) upd(await api('POST', `/api/projects/${S.pid}/share`, { action: 'member', user: +b.dataset.mem, role: b.dataset.role }, false, false));
+      } catch (er) { fail(er); }
+    });
+  });
+}
+
+// ---------------------------------------------------------------- история: версии похода, любую можно вернуть
+let histLayer = null;
+const two = n => String(n).padStart(2, '0');
+function whenTxt(t) {
+  const d = new Date(t * 1000), now = new Date(), y = new Date(now); y.setDate(now.getDate() - 1);
+  const hm = `${d.getHours()}:${two(d.getMinutes())}`, same = (a, b) => a.toDateString() === b.toDateString();
+  return same(d, now) ? `сегодня ${hm}` : same(d, y) ? `вчера ${hm}` : `${two(d.getDate())}.${two(d.getMonth() + 1)}${d.getFullYear() !== now.getFullYear() ? '.' + d.getFullYear() : ''} ${hm}`;
+}
+const whenRange = r => r.ts - r.t0 > 90 ? `${whenTxt(r.t0)}–${new Date(r.ts * 1000).getHours()}:${two(new Date(r.ts * 1000).getMinutes())}` : whenTxt(r.ts);
+const whatTxt = w => String(w).replace(/@(\d{9,})/g, (_, t) => whenTxt(+t));
+async function openHistory() {
+  await flush(); if (S.mode) setMode(null);
+  S.hist = { items: null, sel: null }; paintEditor(); loadHistory();
+}
+async function loadHistory() {
+  try { const r = await api('GET', `/api/projects/${S.pid}/history`, undefined, false, 'Открываю историю…'); if (!S.hist) return; S.hist.items = r.items; S.hist.keep = r.keep; paintPanel(); }
+  catch (e) { fail(e); closeHist(); }
+}
+function closeHist(quiet) { S.hist = null; histLayer && histLayer.clearLayers(); if (!quiet) paintEditor(); }
+function historyPanel() {
+  const H = S.hist;
+  const head = `<div class="hhead"><h2>История</h2><button class="btn sm" data-a="histclose">← К походу</button></div>`;
+  if (!H.items) return head + '<div class="hint">Загружаю…</div>';
+  return `${head}<p>Каждое изменение похода — версия: кто, когда и что поменял. Нажми на версию — она покажется на карте синим пунктиром поверх нынешней нитки. «Вернуть» сделает поход таким, каким он был тогда; сам возврат тоже попадёт сюда, так что его можно отменить.</p>
+    <div class="revs">${H.items.map((r, i) => `<div class="rev${i === 0 ? ' cur' : ''}${H.sel === r.id ? ' sel' : ''}" data-a="hsel" data-id="${r.id}" tabindex="0">
+      <div class="rh"><b>${whenRange(r)}</b><span class="who_">${esc(r.who || '—')}</span>${r.km ? `<span class="hint">${km(r.km)} км</span>` : ''}${i === 0 ? '<span class="tag ok">сейчас</span>' : r.kind === 'restore' ? '<span class="tag sun">возврат</span>' : ''}</div>
+      <ul>${r.what.map(w => `<li>${esc(whatTxt(w))}</li>`).join('')}</ul>
+      ${H.sel === r.id && i > 0 ? `<div class="chips"><button class="btn sm go" data-a="hrestore" data-id="${r.id}">Вернуть эту версию</button><span class="hint">на карте — синим пунктиром</span></div>` : ''}</div>`).join('')}</div>
+    <div class="hint">Хранятся последние ${H.keep} версий. Мелкие правки одного человека подряд собираются в одну версию; загрузка файлов, правка трека и возвраты — всегда отдельной.</div>`;
+}
+async function histSelect(id) {
+  const H = S.hist; if (!H) return;
+  H.sel = H.sel === id ? null : id; paintPanel();
+  if (!histLayer) histLayer = L.layerGroup().addTo(map); histLayer.clearLayers();
+  if (!H.sel || H.items[0].id === id) return;
+  try {
+    const v = await api('GET', `/api/projects/${S.pid}/history/${id}`, undefined, false, 'Показываю версию…');
+    if (!S.hist || S.hist.sel !== id) return;
+    const all = [];
+    v.lines.forEach(l => { L.polyline(l.pts, { color: '#fff', weight: 8, opacity: .85, interactive: false }).addTo(histLayer); L.polyline(l.pts, { color: '#1F6FD1', weight: 4, dashArray: '7 7', interactive: false }).addTo(histLayer); all.push(...l.pts); });
+    v.points.forEach(q => L.circleMarker([q.lat, q.lon], { radius: 5, color: '#1F6FD1', weight: 2, fillColor: '#fff', fillOpacity: 1 }).bindTooltip(esc(q.name || ''), { className: 'tt' }).addTo(histLayer));
+    if (all.length && isPhone() && mapSize() !== 'big') { S.mapTemp = 'big'; applyMapSize(); }
+    if (all.length) { const b = L.latLngBounds(all); if (!map.getBounds().contains(b)) map.fitBounds(b.pad(0.1)); }
+  } catch (e) { fail(e); }
+}
+function histRestore(id) {
+  const r = (S.hist.items || []).find(x => x.id === id); if (!r) return;
+  confirmBox(`Вернуть версию «${whenRange(r)}»?`, 'Поход станет таким, каким был тогда: нитка, дни, точки, настройки. Нынешнее состояние останется в истории — к нему можно вернуться. Собранные карты не меняются: если нужно, пересобери.', 'Вернуть', async () => {
+    try {
+      const d = await api('POST', `/api/projects/${S.pid}/history`, { id }, false, 'Возвращаю версию…');
+      S.proj = d.project; S.selPiece = S.selPoint = null; histLayer && histLayer.clearLayers(); S.hist.sel = null;
+      $('.top .title') && ($('.top .title').value = P().meta.title); document.title = (P().meta.title || 'Поход') + ' — Нитка';
+      drawMap(true); await loadHistory(); toast(d.msg);
+    } catch (e) { fail(e); }
+  });
+}
+
+// ---------------------------------------------------------------- просмотр по ссылке: нитка, дни, точки, готовые карты
+function viewerPanel() {
+  const pr = P(), b = S.build || {}, sm = b.summary, ok = (b.sheets || []).filter(s => s.state === 'ok');
+  const pcs = pr.pieces.filter(p => p.role === 'main' || p.role === 'radial');
+  const days = [...new Set(pcs.map(p => p.day).filter(Boolean))].sort((x, y) => x - y);
+  const kc = +pr.meta.kcoef || 1, total = sm ? sm.km : pcs.reduce((s, p) => s + (p.km || 0), 0) * kc;
+  const d0 = startDate(), dates = d0 && days.length ? `${dm(d0)}–${dm(dateOf(days[days.length - 1]))}.${dateOf(days[days.length - 1]).getFullYear()}` : '';
+  const pts = pr.points.filter(q => ['camp', 'pass', 'peak'].includes(q.type) && q.on_map !== false);
+  const left = b.expires ? Math.max(0, Math.ceil((b.expires * 1000 - Date.now()) / 864e5)) : 0;
+  return `<h2>${esc(pr.meta.title)}</h2>
+    <div class="vmeta">${[pr.meta.kind, pr.meta.area, dates, total ? km(total) + ' км' : '', days.length ? `${days.length} ${plural(days.length, 'день', 'дня', 'дней')}` : '', sm ? `+${sm.up} м` : ''].filter(Boolean).map(x => `<span>${esc(x)}</span>`).join('')}</div>
+    <p class="hint">Автор — ${esc(S.owner || '')}. Поход открыт для просмотра: нитка, дни, точки и готовые карты.${S.user ? '' : ' Войди — и он появится в твоём списке.'}</p>
+    ${ok.length ? `<div class="sec"><h3>Карты</h3><div class="chips"><a class="btn go" href="/api/projects/${S.pid}/zip?fmt=png${S.share ? '&' + sq() : ''}" download>${I.dl}Скачать всё архивом</a><a class="btn sm" href="${fileUrl('karty.pdf', true)}">PDF</a>${b.docx ? `<a class="btn sm" href="${fileUrl('grafik_dvizheniya.docx', true)}">График движения</a>` : ''}</div>
+      <div class="gal vgal">${(b.sheets || []).map((s, i) => s.state === 'ok' ? `<div class="sheet ok" data-a="view" data-i="${i}"><div class="pic"><img loading="lazy" src="${fileUrl(s.file.replace('.png', '.thumb.jpg'))}" alt=""></div><div class="cap"><b>${esc(s.title)}</b></div></div>` : '').join('')}</div>
+      <div class="hint">Файлы карт хранятся ещё ${left} ${plural(left, 'день', 'дня', 'дней')}.</div></div>`
+      : '<div class="banner blue">Карты этого похода сейчас не собраны — попроси автора собрать их, если нужны.</div>'}
+    ${sm ? summaryHtml(sm, b) : days.length ? `<div class="sec"><h3>По дням</h3>${days.map(d => { const ps = pcs.filter(p => p.day === d); const k = ps.reduce((s, p) => s + (p.km || 0), 0) * kc;
+        return `<button class="vday" data-a="vday" data-d="${d}"><b>День ${d}</b>${d0 ? `<span>${dm(dateOf(d))}, ${wd(dateOf(d))}</span>` : ''}<span>${km(k)} км</span><span class="hint">${esc(ps.map(p => p.name).join(', '))}</span></button>`; }).join('')}</div>` : ''}
+    ${pts.length ? `<div class="sec"><h3>Ночёвки, перевалы, вершины</h3><div class="vpts">${pts.map(q => `<button class="vpt" data-a="vpt" data-id="${q.id}"><span class="ic">${sym(q.type)}</span><b>${esc(q.name || (q.type === 'camp' ? 'ночёвка' : ''))}</b>${q.grade ? `<span class="tag">${esc(q.grade)}</span>` : ''}${q.h ? `<span class="hint">${q.h} м</span>` : ''}</button>`).join('')}</div></div>` : ''}
+    <div class="sec"><h3>Трек</h3><div><a class="btn sm" href="/api/projects/${S.pid}/export.gpx${S.share ? '?' + sq() : ''}" download>Скачать GPX</a></div></div>`;
+}
 const startDate = () => P().meta.start_date ? new Date(P().meta.start_date + 'T00:00') : null;
 function dateOf(n) { const s = startDate(); if (!s) return null; const d = new Date(s); d.setDate(s.getDate() + n - 1); return d; }
 const dm = d => d ? String(d.getDate()).padStart(2, '0') + '.' + String(d.getMonth() + 1).padStart(2, '0') : '';
@@ -609,12 +786,16 @@ function radialCtl(p) {
 function renderEditor() {
   document.title = (P().meta.title || 'Поход') + ' — Нитка';
   const stepsHtml = STEPS.map(([id, t], i) => `<button class="step" data-a="step" data-step="${id}"><span class="dot">${i + 1}</span><span>${t}</span></button>`).join('');
-  app.innerHTML = `<div class="ed">` + topBar(`<input class="title" data-c="title" value="${esc(P().meta.title)}" maxlength="100" aria-label="Название похода" spellcheck="false">
-      <span class="saved">сохранено</span><a class="btn sm go dlall" id="dlall" hidden download title="Все готовые листы одним архивом">${I.dl}<span>Скачать всё</span></a><span class="sp"></span><nav class="steps">${stepsHtml}</nav><span class="sp"></span><span class="who">${esc(S.user.name)}</span>`) + `
+  const ro = S.role === 'view';
+  const bar = ro ? `<span class="vtitle">${esc(P().meta.title)}</span><span class="vtag">только просмотр</span><span class="sp"></span>
+      ${S.user ? `<button class="btn ghost sm" data-a="vcopy" title="Своя копия похода — её можно править">Копия себе</button><span class="who">${esc(S.user.name)}</span>` : '<button class="btn ghost sm" data-a="vlogin">Войти</button>'}`
+    : `<input class="title" data-c="title" value="${esc(P().meta.title)}" maxlength="100" aria-label="Название похода" spellcheck="false">
+      <span class="saved">сохранено</span><button class="btn ghost sm tbtn${S.shared ? ' on' : ''}" data-a="share" title="Поделиться — ссылка для просмотра или для совместной правки">${I.share}<span>Поделиться</span></button><button class="btn ghost sm tbtn" data-a="history" title="История — кто и что менял; любую версию можно вернуть">${I.clock}<span>История</span></button><a class="btn sm go dlall" id="dlall" hidden download title="Все готовые листы одним архивом">${I.dl}<span>Скачать всё</span></a><span class="sp"></span><nav class="steps">${stepsHtml}</nav><span class="sp"></span><span class="who">${esc(S.user.name)}</span>`;
+  app.innerHTML = `<div class="ed${ro ? ' viewer' : ''}">` + topBar(bar) + `
     <div class="ed-body"><section class="panel" id="panel"></section>
       <div class="mapwrap"><div id="map"></div><div class="mapbar">${[['otm', 'Топо'], ['gsh100', 'Генштаб'], ['esri', 'Спутник']].map(([id, t]) => `<button class="chip" data-a="base" data-base="${id}">${t}</button>`).join('')}</div></div>
       <div class="maphandle" id="maphandle"></div>
-    </div><nav class="tabbar">${stepsHtml}</nav></div>`;
+    </div>${ro ? '' : `<nav class="tabbar">${stepsHtml}</nav>`}</div>`;
   initMap(); applyMapSize(); paintEditor(true);
 }
 // На телефоне карта сворачивается: 'off' — скрыта, 'small' — полоска, 'big' — на пол-экрана
@@ -643,7 +824,7 @@ document.addEventListener('scroll', () => updMore(), true);
 window.addEventListener('resize', () => updMore());
 function paintEditor(fit) {
   if (!S.proj) return;
-  const body = $('.ed-body'); const wide = S.step === 'maps';
+  const body = $('.ed-body'); const wide = S.step === 'maps' && !S.hist && S.role !== 'view';
   body.classList.toggle('wide', wide);
   const idx = STEPS.findIndex(s => s[0] === S.step);
   $$('.step').forEach(b => { const i = STEPS.findIndex(s => s[0] === b.dataset.step); b.classList.toggle('on', i === idx); b.classList.toggle('done', i < idx); });
@@ -654,9 +835,10 @@ function paintEditor(fit) {
 function paintPanel(top) {
   const el = $('#panel'); if (!el) return;
   const y = el.scrollTop; const out = $('.out'); const y2 = out ? out.scrollTop : 0;
-  el.className = S.step === 'maps' ? 'build-host' : 'panel';
-  el.style.cssText = S.step === 'maps' ? 'overflow:hidden;min-height:0;display:block;height:100%' : '';
-  el.innerHTML = ({ tracks: stepTracks, days: stepDays, points: stepPoints, maps: stepMaps })[S.step]();
+  const own = S.role === 'view' || S.hist;      // страница просмотра или журнал — вместо шага
+  el.className = S.step === 'maps' && !own ? 'build-host' : 'panel';
+  el.style.cssText = S.step === 'maps' && !own ? 'overflow:hidden;min-height:0;display:block;height:100%' : '';
+  el.innerHTML = S.role === 'view' ? viewerPanel() : S.hist ? historyPanel() : ({ tracks: stepTracks, days: stepDays, points: stepPoints, maps: stepMaps })[S.step]();
   if (!top) { el.scrollTop = y; const o = $('.out'); if (o) o.scrollTop = y2; } else el.scrollTop = 0;
   if (S.step === 'tracks') bindDrop();
   markSteps();
@@ -1057,7 +1239,6 @@ function workScaleField(sh) {
   return `<div class="field"><span>Масштаб рабочей карты</span><div class="chips">${chips}</div>${tip}</div>${sh.work !== false ? scheme : ''}`;
 }
 function stepMaps() {
-  let hasT = false;
   const pr = P(); const sh = pr.sheets || {}; const b = S.build || { state: 'none', sheets: [] };
   const running = ['running', 'queued'].includes(b.state); const sheets = b.sheets || []; const ok = sheets.filter(s => s.state === 'ok');
   const hasTrack = pr.pieces.some(p => p.role !== 'skip');
@@ -1098,8 +1279,12 @@ function stepMaps() {
           <div class="cap"><b>${esc(s.title)}</b><div class="s">${km(s.w_cm)} × ${km(s.h_cm)} см${s.note ? ' · ' + esc(s.note) : ''}</div>
           <div class="dl"><a href="/files/${S.pid}/${s.file}?dl=1" data-stop>PNG</a><a href="/files/${S.pid}/${s.file.replace('.png', '.jpg')}?dl=1" data-stop>JPG</a>${s.frame ? `<a href="#" data-stop data-a="frame" data-i="${i}" title="Сдвинуть рамку или поменять масштаб этого листа">Рамка</a>` : ''}</div></div></div>`
         : `<div class="sheet ${s.state === 'run' ? 'run' : ''}"><div class="pic"><div class="wait">${s.state === 'run' ? 'рисую' : s.state === 'err' ? 'ошибка' : 'ждёт'}</div></div><div class="cap"><b>${esc(s.title)}</b><div class="s">${s.state === 'err' ? esc(s.error || '') : '&nbsp;'}</div></div></div>`).join('')}</div>
-      ${(() => { hasT = !!(sm && sm.days && sm.days.some(d => d.t_start)); return ''; })()}
-      ${sm && sm.days ? `<div class="sec"><h3>${isPlan() ? 'График движения (план)' : 'Сводка по дням'} <span class="hint" style="text-transform:none;letter-spacing:0;font:400 13.5px var(--body)">— ${isPlan() ? 'для заявки' : 'для графика движения'}</span></h3>${b.docx ? `<a class="btn sm" href="/files/${S.pid}/grafik_dvizheniya.docx?dl=1" style="justify-self:start">Скачать в Word (docx)</a>` : ''}
+      ${sm ? summaryHtml(sm, b) : ''}
+    </section></div>`;
+}
+function summaryHtml(sm, b) {
+  const hasT = !!(sm && sm.days && sm.days.some(d => d.t_start));
+  return `${sm && sm.days ? `<div class="sec"><h3>${isPlan() ? 'График движения (план)' : 'Сводка по дням'} <span class="hint" style="text-transform:none;letter-spacing:0;font:400 13.5px var(--body)">— ${isPlan() ? 'для заявки' : 'для графика движения'}</span></h3>${b.docx ? `<a class="btn sm" href="${fileUrl('grafik_dvizheniya.docx', true)}" style="justify-self:start">Скачать в Word (docx)</a>` : ''}
         <div class="tblwrap"><table class="sum"><thead><tr><th>День</th><th>Дата</th><th class="n">Км</th><th class="n">Набор</th><th class="n">Сброс</th><th class="n">Высоты, м</th>${hasT ? '<th class="n">Выход</th><th class="n">Приход</th><th class="n">ЧХВ</th><th class="n">Привалы</th>' : ''}<th class="obj">${sm.days.some(d => (d.key_objects || []).length) ? 'Определяющие препятствия' : 'Препятствия'}</th></tr></thead><tbody>
         ${sm.days.map(d => `<tr><td>${d.n}</td><td>${d.date}</td><td class="n">${km(d.km)}</td><td class="n">+${d.up}</td><td class="n">−${d.dn}</td><td class="n">${d.zmin}–${d.zmax}</td>${hasT ? `<td class="n">${d.t_start || ''}</td><td class="n">${d.t_end || ''}</td><td class="n">${d.move || ''}</td><td class="n">${d.n_stops ? `${d.n_stops} · ${d.pause}` : ''}</td>` : ''}<td>${esc(((d.key_objects || []).length ? d.key_objects : d.objects).join('; '))}</td></tr>`).join('')}
         <tr><td colspan="2"><b>Всего</b></td><td class="n"><b>${km(sm.km)}</b></td><td class="n"><b>+${sm.up}</b></td><td class="n"><b>−${sm.dn}</b></td><td></td>${hasT ? `<td></td><td></td><td class="n"><b>${sm.move || ''}</b></td><td></td>` : ''}<td class="hint">${sm.kcoef !== 1 ? `км с коэффициентом ${km(sm.kcoef)}; ` : ''}высоты — ${sm.elev === 'track' ? 'из трека' : 'по модели рельефа'}</td></tr></tbody></table></div>
@@ -1107,9 +1292,10 @@ function stepMaps() {
       ${sm && sm.variants && sm.variants.length ? `<div class="sec"><h3>Запасные варианты и аварийные выходы</h3>
         <div class="tblwrap"><table class="sum vtbl"><thead><tr><th>№</th><th>Вариант</th><th>Откуда — куда</th><th class="n">Км</th><th class="n">Набор</th><th class="n">Сброс</th><th>Препятствия</th></tr></thead><tbody>
         ${sm.variants.map(v => `<tr><td><span class="vbadge ${v.kind}">${v.lab}</span></td><td class="w"><b>${esc(v.title)}</b>${v.note ? `<div class="hint">${esc(v.note)}</div>` : ''}</td><td>${esc(v.route)}</td><td class="n">${km(v.km)}</td><td class="n">+${v.up}</td><td class="n">−${v.dn}</td><td>${esc(v.objects.join('; '))}</td></tr>`).join('')}
-        </tbody></table></div><div class="hint">Варианты не входят в километраж и набор маршрута выше. Набор — по модели рельефа.</div></div>` : ''}
-    </section></div>`;
+        </tbody></table></div><div class="hint">Варианты не входят в километраж и набор маршрута выше. Набор — по модели рельефа.</div></div>` : ''}`;
 }
+const sq = () => S.share ? `s=${S.share}` : '';      // смотрят по ссылке без входа — ссылка едет с каждым файлом
+const fileUrl = (name, dl) => `/files/${S.pid}/${name}?${[dl ? 'dl=1' : '', sq()].filter(Boolean).join('&')}`;
 let pollT = null;
 function stopPoll() { clearInterval(pollT); pollT = null; }
 function startPoll() {
@@ -1132,9 +1318,10 @@ function lightbox(i) {
   const sheets = (S.build.sheets || []); const oks = sheets.map((s, k) => [s, k]).filter(([s]) => s.state === 'ok'); let pos = oks.findIndex(([, k]) => k === i);
   const el = document.createElement('div'); el.className = 'light';
   const show = () => { const s = oks[pos][0];
-    el.innerHTML = `<header><b>${esc(s.title)}</b><span class="hint" style="color:#cfe0f2">${pos + 1} / ${oks.length}</span>${s.frame ? '<button class="btn ghost sm" data-l="frame">Рамка</button>' : ''}<button class="btn ghost sm" data-l="rebuild">Пересобрать этот лист</button><a class="btn ghost sm" href="/files/${S.pid}/${s.file}?dl=1">PNG</a><a class="btn ghost sm" href="/files/${S.pid}/${s.file.replace('.png', '.jpg')}?dl=1">JPG</a>
+    const ro = S.role === 'view';
+    el.innerHTML = `<header><b>${esc(s.title)}</b><span class="hint" style="color:#cfe0f2">${pos + 1} / ${oks.length}</span>${s.frame && !ro ? '<button class="btn ghost sm" data-l="frame">Рамка</button>' : ''}${ro ? '' : '<button class="btn ghost sm" data-l="rebuild">Пересобрать этот лист</button>'}<a class="btn ghost sm" href="${fileUrl(s.file, true)}">PNG</a><a class="btn ghost sm" href="${fileUrl(s.file.replace('.png', '.jpg'), true)}">JPG</a>
       <button class="icon-btn" data-l="prev" title="Назад">${I.back}</button><button class="icon-btn" data-l="next" title="Вперёд" style="transform:scaleX(-1)">${I.back}</button><button class="icon-btn" data-l="close" title="Закрыть">${I.x}</button></header>
-      <div class="view"><img src="/files/${S.pid}/${s.file.replace('.png', '.prev.jpg')}?v=${s.ver || 0}" alt="${esc(s.title)}"></div>`; };
+      <div class="view"><img src="/files/${S.pid}/${s.file.replace('.png', '.prev.jpg')}?v=${s.ver || 0}${S.share ? '&' + sq() : ''}" alt="${esc(s.title)}"></div>`; };
   const close = () => { el.remove(); document.removeEventListener('keydown', key); };
   const step = d => { pos = (pos + d + oks.length) % oks.length; show(); };
   const key = e => { if (e.key === 'Escape') close(); if (e.key === 'ArrowRight') step(1); if (e.key === 'ArrowLeft') step(-1); };
@@ -1155,7 +1342,7 @@ function destroyMap() { if (map) { map.remove(); map = null; } markers = {}; lin
 // Слой карты. Если плитка не пришла (внешний сервер карты не ответил), просим её ещё до четырёх раз с паузами;
 // на последней попытке сервер отдаёт увеличенный кусок более мелкого зума — лучше мутно, чем дыра.
 function tiles(base, opts = {}) {
-  const l = L.tileLayer(`/tiles/${base}/{z}/{x}/{y}.png?v=5`, { maxNativeZoom: { otm: 17, gsh100: 15, esri: 17 }[base] || 17, maxZoom: 18, minZoom: 3, ...opts });
+  const l = L.tileLayer(`/tiles/${base}/{z}/{x}/{y}.png?v=5${S.share && !S.user ? '&' + sq() : ''}`, { maxNativeZoom: { otm: 17, gsh100: 15, esri: 17 }[base] || 17, maxZoom: 18, minZoom: 3, ...opts });
   // тайла пока нет (OpenTopoMap дорисовывает крупный зум, сервер карты не ответил): сразу показываем увеличенный кусок
   // более мелкого зума, а сам тайл спрашиваем ещё раз через 5, 15 и 30 секунд
   l.on('tileerror', e => {
@@ -1282,7 +1469,7 @@ function drawBands() {
     const info = bandInfo(b, chains); if (!info.path.length) continue; const st = bandStyle(b); const sel = S.selBand === b.id;
     const l = L.polyline(info.path, { color: st.color, weight: sel ? 22 : 16, opacity: sel ? .75 : .5, lineCap: 'butt', dashArray: st.hatch ? '10 3' : null }).addTo(bandLayer);
     l.bindTooltip(`${st.title} · ${km(info.km)} км`, { sticky: true, className: 'tt' });
-    l.on('click', ev => { L.DomEvent.stopPropagation(ev); if (S.mode) return mapClick(ev.latlng); S.selBand = b.id; S.selPoint = null; S.ptab = 'bands'; if (S.step !== 'points') go(`#/p/${S.pid}/points`); else paintPanel(); drawBands(); });
+    l.on('click', ev => { L.DomEvent.stopPropagation(ev); if (S.role === 'view') return; if (S.mode) return mapClick(ev.latlng); S.selBand = b.id; S.selPoint = null; S.ptab = 'bands'; if (S.step !== 'points') go(`#/p/${S.pid}/points`); else paintPanel(); drawBands(); });
   }
   if (S.bandA) L.circleMarker(S.bandA, { radius: 8, color: '#133C6A', weight: 3, fillColor: '#FEBC0E', fillOpacity: 1, interactive: false }).addTo(bandLayer);
 }
@@ -1317,7 +1504,7 @@ function drawPieces() {
     const ll = p.pts.map(q => [q[0], q[1]]);
     L.polyline(ll, { color: '#fff', weight: (style.weight || 4) + 3.5, opacity: editing ? .5 : .9, interactive: false }).addTo(pieceLayer);
     const l = L.polyline(ll, style).addTo(pieceLayer);
-    l.on('click', ev => { L.DomEvent.stopPropagation(ev); if (S.mode === 'editor') return ED && ED.pieceClick(p.id, ev.latlng); if (S.mode) return mapClick(ev.latlng); S.selPiece = p.id; if (S.step !== 'days') go(`#/p/${S.pid}/days`); else { paintPanel(); } drawPieces(); const r = $(`.pc[data-id="${p.id}"]`); r && r.scrollIntoView({ block: 'center', behavior: 'smooth' }); });
+    l.on('click', ev => { L.DomEvent.stopPropagation(ev); if (S.role === 'view') return; if (S.mode === 'editor') return ED && ED.pieceClick(p.id, ev.latlng); if (S.mode) return mapClick(ev.latlng); S.selPiece = p.id; if (S.step !== 'days') go(`#/p/${S.pid}/days`); else { paintPanel(); } drawPieces(); const r = $(`.pc[data-id="${p.id}"]`); r && r.scrollIntoView({ block: 'center', behavior: 'smooth' }); });
     l.bindTooltip(`${p.day ? 'День ' + p.day + ' · ' : ''}${p.name} · ${km(p.km || 0)} км${editing ? ' — нажми, чтобы править вместе' : ''}`, { sticky: true, className: 'tt' });
     lines[p.id] = l;
   };
@@ -1336,7 +1523,7 @@ function drawPoints() {
     const sel = S.selPoint === q.id;
     const m = L.marker([q.lat, q.lon], { icon: L.divIcon({ className: '', html: `<div class="pm${sel ? ' sel' : ''}${q.on_map === false ? ' off' : ''}">${sym(q.type)}</div>`, iconSize: [22, 22], iconAnchor: [11, 11] }), draggable: sel, zIndexOffset: sel ? 1000 : (q.type === 'photo' ? -100 : 0), keyboard: false });
     m.bindTooltip(ptTitle(q), { direction: 'top', offset: [0, -10], className: 'tt' });
-    m.on('click', ev => { L.DomEvent.stopPropagation(ev); if (S.mode) return mapClick(ev.latlng); S.selPoint = q.id; S.selBand = null; if (!(S.ptab === 'obst' && S.obj.includes(q.type))) S.ptab = 'points'; if (S.step !== 'points') { go(`#/p/${S.pid}/points`); setTimeout(scrollToPoint, 60); } else { showPoint(q); paintPanel(); drawPoints(); scrollToPoint(); } });
+    m.on('click', ev => { L.DomEvent.stopPropagation(ev); if (S.role === 'view') return; if (S.mode) return mapClick(ev.latlng); S.selPoint = q.id; S.selBand = null; if (!(S.ptab === 'obst' && S.obj.includes(q.type))) S.ptab = 'points'; if (S.step !== 'points') { go(`#/p/${S.pid}/points`); setTimeout(scrollToPoint, 60); } else { showPoint(q); paintPanel(); drawPoints(); scrollToPoint(); } });
     m.on('dragend', () => { const p = m.getLatLng(); q.lat = +p.lat.toFixed(6); q.lon = +p.lng.toFixed(6); dirty(); });
     m.addTo(pointLayer); markers[q.id] = m;
   }
@@ -1359,16 +1546,27 @@ const A = {
   menu(el, ev) {
     ev.stopPropagation(); $$('.menu').forEach(m => m.remove());
     const id = el.dataset.id, p = S.projects.find(x => x.id === id); const m = document.createElement('div'); m.className = 'menu';
-    m.innerHTML = '<button data-m="open">Открыть</button>' + (p.build && p.build.state === 'done' && p.build.n ? '<button data-m="zip">Скачать всё архивом</button>' : '') + '<button data-m="maps">Сразу к картам</button><button data-m="copy">Сделать копию</button><button data-m="del" class="warn">Удалить</button>';
+    const mine = !p.role || p.role === 'owner';
+    m.innerHTML = '<button data-m="open">Открыть</button>' + (p.build && p.build.state === 'done' && p.build.n ? '<button data-m="zip">Скачать всё архивом</button>' : '') + (p.role === 'view' ? '' : '<button data-m="maps">Сразу к картам</button>') + `<button data-m="copy">Сделать копию</button><button data-m="del" class="warn">${mine ? 'Удалить' : 'Убрать из моих'}</button>`;
     const r = el.getBoundingClientRect(); m.style.top = r.bottom + 6 + 'px'; m.style.left = Math.min(r.left, innerWidth - 210) + 'px'; document.body.append(m);
     const off = () => { m.remove(); document.removeEventListener('click', off); }; setTimeout(() => document.addEventListener('click', off), 0);
     m.onclick = async e => { const a = e.target.dataset.m; if (!a) return;
       if (a === 'zip') location.href = `/api/projects/${id}/zip?fmt=png`;
       if (a === 'open') go(`#/p/${id}/tracks`); if (a === 'maps') go(`#/p/${id}/maps`);
       if (a === 'copy') { try { await api('POST', `/api/projects/${id}/copy`, undefined, false, 'Делаю копию…'); await loadProjects(); renderHome(); toast('Копия готова'); } catch (er) { fail(er); } }
-      if (a === 'del') confirmBox('Удалить поход?', `«${esc(p.title)}» исчезнет вместе с треками и собранными картами. Вернуть будет нельзя.`, 'Удалить', async () => { try { await api('DELETE', `/api/projects/${id}`); await loadProjects(); renderHome(); toast('Поход удалён'); } catch (er) { fail(er); } }); };
+      if (a === 'del') confirmBox(mine ? 'Удалить поход?' : 'Убрать из моих походов?', mine ? `«${esc(p.title)}» исчезнет вместе с треками, собранными картами и журналом изменений${p.members ? ' — и у тех, с кем ты им поделился' : ''}. Вернуть будет нельзя.` : `«${esc(p.title)}» останется у ${esc(p.owner || 'владельца')} — вернуться можно по той же ссылке.`, mine ? 'Удалить' : 'Убрать',
+        async () => { try { await api('DELETE', `/api/projects/${id}`); await loadProjects(); renderHome(); toast(mine ? 'Поход удалён' : 'Поход убран из твоего списка'); } catch (er) { fail(er); } }); };
   },
-  step(el) { go(`#/p/${S.pid}/${el.dataset.step}`); },
+  step(el) { if (S.hist) { closeHist(); if (el.dataset.step === S.step) return; } go(`#/p/${S.pid}/${el.dataset.step}`); },
+  share() { openShareBox(); },
+  history() { openHistory(); },
+  histclose() { closeHist(); },
+  hsel(el, ev) { if (ev.target.closest('button')) return; histSelect(+el.dataset.id); },
+  hrestore(el) { histRestore(+el.dataset.id); },
+  vpt(el) { const q = P().points.find(x => x.id === el.dataset.id); if (q && map) { if (isPhone() && mapSize() !== 'big') { S.mapTemp = 'big'; applyMapSize(); } map.setView([q.lat, q.lon], Math.max(map.getZoom(), 14)); const mk = markers[q.id]; mk && mk.openTooltip(); } },
+  vday(el) { const ll = P().pieces.filter(p => p.day === +el.dataset.d && p.role !== 'skip').flatMap(p => p.pts.map(q => [q[0], q[1]])); if (ll.length && map) { if (isPhone() && mapSize() !== 'big') { S.mapTemp = 'big'; applyMapSize(); } map.fitBounds(L.latLngBounds(ll).pad(0.15)); } },
+  async vcopy() { try { const r = await api('POST', `/api/projects/${S.pid}/copy`, undefined, false, 'Делаю копию…'); toast('Копия готова — она твоя, её можно править'); go(`#/p/${r.id}/tracks`); } catch (e) { fail(e); } },
+  vlogin() { S.proj = null; S.pid = null; clearInterval(revT); destroyMap(); renderLogin(); },
   base(el) {
     const order = ['otm', 'gsh100', 'esri'];
     S.base = el.dataset.base === S.base && isPhone() ? order[(order.indexOf(S.base) + 1) % order.length] : el.dataset.base; localStorage.nitkaBase = S.base; setBase(); $$('.mapbar .chip').forEach(c => c.classList.toggle('on', c.dataset.base === S.base)); },

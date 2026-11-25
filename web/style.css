@@ -650,3 +650,51 @@ body.editing .leaflet-container { outline: 4px solid #F68A1D; outline-offset: -4
 /* переключатель из равных кнопок во всю ширину поля — без переноса на вторую строку */
 .seg.even { display: grid; grid-auto-columns: 1fr; grid-auto-flow: column; width: 100%; align-self: stretch; border-radius: 999px; }
 .seg.even button { justify-content: center; text-align: center; padding-left: 6px; padding-right: 6px; white-space: nowrap; }
+
+/* ---- поделиться, история, просмотр */
+.top .tbtn { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.top .tbtn svg { width: 18px; height: 18px; flex: none; }
+.top .tbtn.on { box-shadow: inset 0 0 0 2px var(--sun); }
+@media (max-width: 1180px) { .top .tbtn span { display: none; } .top .tbtn { padding: 0 8px; } }
+.top .vtitle { font: 800 22px var(--head); color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.top .vtag { font: 700 12px var(--head); letter-spacing: .06em; text-transform: uppercase; color: var(--navy); background: var(--sun); border-radius: 999px; padding: 2px 9px; white-space: nowrap; }
+.card .tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.tag.share { background: #E3ECFF; color: #1F4FA8; }
+.login .invite { background: var(--sun-l); border: 2px solid var(--sun); border-radius: 12px; padding: 10px 12px; color: var(--navy); line-height: 1.4; }
+.sharebox { max-width: 620px; }
+.sharebox .shr { display: grid; gap: 8px; padding: 12px 0; border-bottom: 1px solid var(--sky-l); }
+.sharebox .shl { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.sharebox .shl input { flex: 1 1 220px; min-width: 0; font: 500 13.5px var(--body); padding: 7px 9px; border: 2px solid var(--sky-l); border-radius: 9px; background: #F6F9FD; color: var(--navy); }
+.sharebox .shm { display: grid; gap: 6px; padding-top: 12px; }
+.sharebox .shm h3 { margin: 0 0 2px; }
+.sharebox .mrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 4px 0; }
+.sharebox .mrow b { flex: 1 1 120px; min-width: 0; }
+.hhead { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.hhead h2 { margin: 0; }
+.revs { display: grid; gap: 8px; margin: 6px 0 10px; }
+.rev { border: 2px solid var(--sky-l); border-radius: 12px; padding: 9px 12px; cursor: pointer; background: var(--paper); transition: border-color .15s, background .15s; }
+.rev:hover { border-color: var(--sky); }
+.rev.sel { border-color: #1F6FD1; background: #F1F6FF; }
+.rev.cur { border-style: dashed; cursor: default; }
+.rev .rh { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.rev .rh b { font: 700 15px var(--head); color: var(--navy); }
+.rev .rh .who_ { font-weight: 600; color: var(--navy); }
+.rev ul { margin: 4px 0 0; padding-left: 18px; font-size: 13.5px; color: #33475f; }
+.rev .chips { margin-top: 8px; align-items: center; }
+.vmeta { display: flex; flex-wrap: wrap; gap: 6px; margin: -4px 0 8px; }
+.vmeta span { background: var(--sky-l); color: var(--navy); border-radius: 999px; padding: 2px 10px; font: 700 13px var(--head); letter-spacing: .03em; }
+.vday { display: grid; grid-template-columns: auto auto 1fr; gap: 2px 10px; align-items: baseline; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--sky-l); background: none; padding: 8px 2px; cursor: pointer; font: inherit; color: inherit; }
+.vday:hover { background: #F6F9FD; }
+.vday .hint { grid-column: 1 / -1; }
+.vday span:nth-child(3) { justify-self: end; font-weight: 700; }
+.vpts { display: grid; gap: 2px; }
+.vpt { display: flex; align-items: center; gap: 8px; border: 0; background: none; padding: 5px 2px; text-align: left; cursor: pointer; font: inherit; color: inherit; border-radius: 8px; }
+.vpt:hover { background: #F6F9FD; }
+.vpt .ic svg { width: 20px; height: 20px; display: block; }
+.vpt b { flex: 1; min-width: 0; font-weight: 600; }
+.vgal { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+/* шапка похода никогда не шире экрана: колонка сетки — до остатка, название сжимается первым */
+.ed { grid-template-columns: minmax(0, 1fr); }
+.ed .top { min-width: 0; }
+.ed .top .title { flex: 0 1 auto; width: 16em; }
+@media (max-width: 1180px) { .ed .top .saved { font-size: 0; } .ed .top .saved::before { font-size: 13px; } }
