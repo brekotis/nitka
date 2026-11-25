@@ -85,8 +85,10 @@ export function createEditor(ctx) {
     document.body.classList.add('editing');
     buildBar(); map.on('moveend zoomend', render); document.addEventListener('keydown', onKey);
     const fx = opts.focus && E.pick.length ? E.pts.slice(Math.max(0, E.pick[0] - 2), E.pick[E.pick.length - 1] + 3) : E.pts;
-    map.fitBounds(L.latLngBounds(fx.map(ll)).pad(opts.focus ? 0.6 : 0.08), { maxZoom: 16 });
     ctx.redraw(); render();
+    // верх карты закрыт панелью редактора — наводимся на видимую часть
+    const top = E.bar ? E.bar.getBoundingClientRect().bottom - map.getContainer().getBoundingClientRect().top + 8 : 0;
+    map.fitBounds(L.latLngBounds(fx.map(ll)).pad(opts.focus ? 0.6 : 0.08), { maxZoom: opts.focus ? map.getMaxZoom() : 16, paddingTopLeft: [0, Math.max(0, top)], animate: false });
   }
   function idxOf(pid, i) {      // номер точки куска → номер в цепочке (точка на стыке могла слиться с началом следующего)
     let k = 0, last = -1;

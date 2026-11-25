@@ -525,7 +525,7 @@ function showStretch(p, i0, i1, fit) {      // участок куска — к�
   const ll = p.pts.slice(Math.max(0, i0), i1 + 1).map(q => [q[0], q[1]]); if (ll.length < 1) return;
   L.polyline(ll, { color: '#fff', weight: 9, opacity: .9, interactive: false }).addTo(editLayer);
   L.polyline(ll, { color: '#E2001A', weight: 5, dashArray: '6 6', interactive: false }).addTo(editLayer);
-  if (fit) { if (isPhone() && mapSize() !== 'big') { S.mapTemp = 'big'; applyMapSize(); } map.fitBounds(L.latLngBounds(ll).pad(0.3), { maxZoom: 15 }); }
+  if (fit) { if (isPhone() && mapSize() !== 'big') { S.mapTemp = 'big'; applyMapSize(); } map.fitBounds(L.latLngBounds(ll).pad(0.35), { maxZoom: map.getMaxZoom() }); }      // клубок в 60 м — крупно, выброс в километры — целиком
 }
 function nearestIdx(p, latlng) {      // ближайшая точка куска к клику (в пикселях экрана)
   const cp = map.latLngToContainerPoint(latlng); let best = null;
