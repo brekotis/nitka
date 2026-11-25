@@ -631,6 +631,9 @@ function todos() {
   if (ng) out.push({ step: 'points', tab: 'obst', text: `У ${ng} ${plural(ng, 'перевала', 'перевалов', 'перевалов')} не указана категория`, btn: 'Проставить' });
   const cs = pts.filter(q => q.type === 'campsite' && campDate(q));
   if (cs.length) out.unshift({ step: 'points', tab: 'points', fix: 'camps', text: `${cs.length} ${plural(cs.length, 'точка', 'точки', 'точек')} вида «${cs[0].raw || cs[0].name}» — это ночёвки с датами, а записаны как места под стоянку`, btn: 'Сделать ночёвками' });
+  const y0 = pr.meta.start_date ? +pr.meta.start_date.slice(0, 4) : 0;
+  const yb = y0 ? pts.filter(q => q.type === 'camp' && q.date && Math.abs(+q.date.slice(0, 4) - y0) > 1) : [];
+  if (yb.length) out.unshift({ step: 'points', tab: 'points', fix: 'campyear', text: `У ${yb.length > 1 ? yb.length + ' ночёвок' : 'ночёвки'} дата ${yb[0].date.slice(8, 10)}.${yb[0].date.slice(5, 7)}.${yb[0].date.slice(0, 4)} — похоже, опечатка в годе: из-за неё ночёвки пронумерованы не по порядку`, btn: `Исправить на ${y0}` });
   const g = pts.filter(q => q.guess && q.type !== 'skip').length;
   if (g) out.push({ step: 'points', tab: 'points', filter: 'guess', text: `${g} ${plural(g, 'точка', 'точки', 'точек')}: тип угадан неуверенно`, btn: 'Проверить' });
   out.forEach((t, i) => { t.i = i; });
@@ -1087,6 +1090,14 @@ const A = {
   todo(el) {
     const t = todos()[+el.dataset.i]; if (!t) return;
     if (t.fix === 'camps') return fixCamps();
+    if (t.fix === 'campyear') {      // год ночёвки сильно не совпадает с годом похода — ставим год похода (а если даты на стыке лет — ближайший)
+      const y0 = +P().meta.start_date.slice(0, 4); let n = 0;
+      for (const q of P().points) if (q.type === 'camp' && q.date && Math.abs(+q.date.slice(0, 4) - y0) > 1) {
+        const md = q.date.slice(4), alt = [y0, y0 + 1].map(y => y + md).sort((a, b) => Math.abs(Date.parse(a) - Date.parse(P().meta.start_date)) - Math.abs(Date.parse(b) - Date.parse(P().meta.start_date)));
+        q.date = alt[0]; n++;
+      }
+      dirty(); paintPanel(); drawMap(); return toast(`Год поправлен у ${n} ${plural(n, 'ночёвки', 'ночёвок', 'ночёвок')}. Пересобери карты, чтобы номера ночёвок встали по порядку`);
+    }
     if (t.fix === 'order') return fixOrder();
     const jump = S.step !== t.step; S.selPoint = null; S.selBand = null;
     if (t.tab) S.ptab = t.tab; if (t.filter) S.filter = t.filter;

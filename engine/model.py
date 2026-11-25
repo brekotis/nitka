@@ -9,6 +9,7 @@ from . import dem
 from .classify import TYPE, OBJ_TYPES, GRADES, GRADE_COL, BAND, dist
 
 STEP = 25.0        # шаг выборки по нитке, м
+DENSE_M = 80.0     # медианный шаг трека, до которого его высотам верим (записанный GPS-трек); реже — нарисованный маршрут
 GAP = 400.0        # разрыв между кусками одного дня, с которого это уже «переезд», м
 PIN_M = 100        # привязка к высоте из подписи — если нитка прошла ближе 100 м
 
@@ -248,7 +249,11 @@ class Trip:
         mode = self.meta.get('elev') or 'auto'
         if mode in ('dem', 'track'): return mode
         pts = [p for dd in ([d] if d else self.DAYS) for p in self.day_pts(dd)]
-        return 'track' if pts and sum(1 for p in pts if p in self._ele) >= 0.9 * len(pts) else 'dem'
+        if not pts or sum(1 for p in pts if p in self._ele) < 0.9 * len(pts): return 'dem'
+        # высоты есть, но трек может быть нарисован в планировщике: точки через 200–500 м, высоты подставлены по вершинам —
+        # подъёмы и спуски между ними пропадают. Записанный GPS-трек густой (шаг 10–35 м, после прореживания тоже)
+        gaps = sorted(dist(a, b) for a, b in zip(pts, pts[1:]))
+        return 'track' if gaps and gaps[len(gaps) // 2] <= DENSE_M else 'dem'
 
     def profile(self, d):
         """Профиль дня: x (км пути), c (километраж), z (м), точки, отметки объектов, статистика."""
