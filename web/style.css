@@ -698,3 +698,59 @@ body.editing .leaflet-container { outline: 4px solid #F68A1D; outline-offset: -4
 .ed .top { min-width: 0; }
 .ed .top .title { flex: 0 1 auto; width: 16em; }
 @media (max-width: 1180px) { .ed .top .saved { font-size: 0; } .ed .top .saved::before { font-size: 13px; } }
+
+/* ---- планировщик маршрута */
+.plancta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 12px 14px; border-radius: 14px; background: linear-gradient(135deg, #FFF6D6, #FFE9C4); border: 2px solid var(--sun); }
+.plancta > div { flex: 1 1 220px; min-width: 0; } .plancta b { font: 800 17px var(--head); color: var(--navy); }
+.plancta.small { background: #F6F9FD; border-color: var(--sky-l); } .plancta.small b { font-size: 15px; }
+.startw { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.startc { display: grid; gap: 3px; padding: 10px 12px; border: 2px solid var(--sky-l); border-radius: 12px; cursor: pointer; background: var(--paper); }
+.startc b { font: 800 16px var(--head); color: var(--navy); } .startc span { font-size: 12.5px; color: var(--muted); line-height: 1.3; }
+.startc.on { border-color: var(--navy); box-shadow: 0 0 0 2px var(--sun) inset; }
+@media (max-width: 520px) { .startw { grid-template-columns: 1fr; } }
+.plbar { display: flex; gap: 8px; justify-content: flex-end; margin: 4px 0 2px; position: sticky; top: -1px; z-index: 3; background: var(--paper); padding: 6px 0; }
+.plbar .btn.go { flex: 1 1 auto; }
+.hhead .icon { width: 34px; height: 34px; border: 2px solid var(--navy); border-radius: 9px; background: var(--paper); color: var(--navy); font-size: 18px; cursor: pointer; }
+.hhead .icon:disabled { opacity: .3; cursor: default; }
+.hhead .sp { flex: 1; }
+.plstep { margin: 6px 0; }
+.pltot { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin-top: 8px; font: 700 15px var(--head); color: var(--navy); }
+.pltot b { font-size: 22px; }
+.warnx { color: #B4561A; font-weight: 600; font-size: 12.5px; }
+svg.plprof { width: 100%; height: 150px; display: block; margin: 4px 0 6px; background: #F6F9FD; border-radius: 10px; cursor: crosshair; }
+svg.plprof.stale { opacity: .55; }
+svg.plprof .pa { fill: #F8D7D9; } svg.plprof .pln_ { fill: none; stroke: #E2001A; stroke-width: 2.2; vector-effect: non-scaling-stroke; }
+svg.plprof .pc_ { stroke: #133C6A; stroke-dasharray: 4 4; stroke-width: 1; vector-effect: non-scaling-stroke; }
+svg.plprof .pd { font: 700 11px var(--head); fill: #133C6A; text-anchor: middle; letter-spacing: .04em; }
+svg.plprof .pp { fill: #fff; stroke: #133C6A; stroke-width: 1.6; vector-effect: non-scaling-stroke; }
+svg.plprof .pt { font: 700 10.5px var(--head); fill: #133C6A; text-anchor: middle; paint-order: stroke; stroke: #F6F9FD; stroke-width: 3px; }
+svg.plprof .py { font: 600 10px var(--body); fill: #6b7c90; text-anchor: end; } svg.plprof .px { font: 600 10px var(--body); fill: #6b7c90; text-anchor: end; } svg.plprof .px0 { font: 600 10px var(--body); fill: #6b7c90; }
+svg.plprof .phx { stroke: #133C6A; stroke-width: 1; vector-effect: non-scaling-stroke; } svg.plprof .pht { font: 700 11px var(--head); fill: #133C6A; text-anchor: middle; }
+.pldays { display: grid; gap: 2px; margin-bottom: 8px; font-size: 13.5px; }
+.pldays > div { display: grid; grid-template-columns: 1fr auto auto auto; gap: 10px; padding: 3px 2px; border-bottom: 1px solid var(--sky-l); }
+.pldays span { text-align: right; font-variant-numeric: tabular-nums; }
+.plist { display: grid; gap: 0; margin: 6px 0; }
+.plp { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto auto; align-items: center; gap: 6px; padding: 5px 4px; border-radius: 10px; }
+.plp.sel { background: #FFF6D6; }
+.plp .pname { min-width: 0; padding: 5px 8px; font: 600 14px var(--body); border: 2px solid var(--sky-l); border-radius: 8px; }
+.plp select { padding: 5px 4px; font-size: 13px; border: 2px solid var(--sky-l); border-radius: 8px; background: var(--paper); }
+.plp .plh { white-space: nowrap; font-size: 12px; }
+.plp .icon-btn { width: 28px; height: 28px; font-size: 18px; color: var(--muted); }
+.pll { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-left: 13px; padding: 3px 0 3px 18px; border-left: 3px solid #E2001A; font-size: 12.5px; color: #33475f; }
+.pll .seg.sm button { padding: 2px 9px; font-size: 12px; }
+.plkw { background: none; border: 0; }
+.plk { width: 100%; height: 100%; border-radius: 50%; background: #fff; border: 3px solid #133C6A; display: grid; place-items: center; font: 800 12px var(--head); color: #133C6A; box-shadow: 0 1px 4px rgba(0, 0, 0, .3); box-sizing: border-box; }
+.plk svg { width: 78%; height: 78%; }
+.plk.camp, .plk.pass, .plk.peak { border-radius: 6px; padding: 1px; }
+.plk.start { border-color: #0B8A3E; background: #E4F6EA; } .plk.finish { border-color: #E2001A; background: #FFE9EA; }
+.plk.sel { box-shadow: 0 0 0 4px var(--sun); }
+.plk.mini { width: 24px; height: 24px; border-width: 2px; font-size: 11px; }
+.catw { background: none; border: 0; }
+.catm { position: relative; width: 22px; height: 22px; display: grid; place-items: center; }
+.catm.pass { border-radius: 50%; background: var(--g); border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, .35); }
+.catm.pass b { font: 800 9.5px var(--head); color: #fff; letter-spacing: -.02em; text-shadow: 0 0 2px rgba(0, 0, 0, .45); }
+.catm.peak i { width: 0; height: 0; border-left: 9px solid transparent; border-right: 9px solid transparent; border-bottom: 15px solid #5B3A1E; filter: drop-shadow(0 0 1.5px #fff) drop-shadow(0 1px 2px rgba(0, 0, 0, .3)); }
+.catm .cl { position: absolute; left: 24px; top: 2px; white-space: nowrap; font: 700 11.5px var(--head); color: #133C6A; text-shadow: 0 0 2px #fff, 0 0 2px #fff, 0 0 3px #fff, 0 0 4px #fff; pointer-events: none; }
+.catm:hover { transform: scale(1.2); }
+.plfind { display: flex; gap: 6px; margin: 8px 0 4px; } .plfind input { flex: 1; min-width: 0; padding: 7px 10px; border: 2px solid var(--sky-l); border-radius: 10px; font: 500 14px var(--body); }
+.plfound { display: grid; gap: 2px; margin-bottom: 6px; } .plfound button { text-align: left; border: 0; background: #F6F9FD; border-radius: 8px; padding: 6px 9px; font: 500 13px var(--body); color: var(--navy); cursor: pointer; } .plfound button:hover { background: var(--sky-l); }

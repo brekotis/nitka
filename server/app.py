@@ -2,7 +2,7 @@
 
 python3 -m server.app            (NITKA_PORT=8080, NITKA_DATA=./data, NITKA_CODE=<кодовое слово клуба, необязательно>)
 """
-import gzip, hashlib, hmac, io, json, mimetypes, os, queue, re, secrets, shutil, sqlite3, subprocess, sys, threading, time, urllib.parse, zipfile, zlib
+import gzip, hashlib, hmac, io, json, mimetypes, os, queue, re, secrets, shutil, sqlite3, subprocess, sys, threading, time, urllib.parse, urllib.request, zipfile, zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
@@ -11,7 +11,7 @@ os.makedirs(DATA, exist_ok=True)
 os.environ.setdefault('NITKA_CACHE', os.path.join(DATA, 'cache'))
 sys.path.insert(0, ROOT)
 from engine import classify, importers, mapkit, model, suggest          # noqa: E402
-from engine import sheets as sheets_mod, chrono, trackfix          # noqa: E402
+from engine import sheets as sheets_mod, chrono, trackfix, planner          # noqa: E402
 
 WEB = os.path.join(ROOT, 'web')
 RENDERS = os.path.join(DATA, 'renders')
@@ -181,7 +181,7 @@ REV_GAP, REV_SPAN = 600, 3600      # подряд идущие мелкие пр
 META_WORDS = {'area': 'район', 'kind': 'вид похода', 'start_date': 'дата начала', 'kcoef': 'коэффициент км', 'mode': 'план или отчёт',
               'tz': 'часовой пояс', 'radial_one_way': 'радиалки', 'category': 'категория', 'note': 'заметка'}
 PART_WORDS = {'bands': 'участки пути', 'sheets': 'настройки карт', 'variants': 'варианты', 'custom_types': 'свои типы точек',
-              'sources': 'файлы', 'frames': 'рамки листов', 'chrono': 'хронометраж'}
+              'sources': 'файлы', 'frames': 'рамки листов', 'chrono': 'хронометраж', 'plan': 'нарисованный маршрут'}
 
 def pack(js): return zlib.compress(js.encode('utf-8'), 6)
 def unpack(b): return json.loads(zlib.decompress(b).decode('utf-8'))
@@ -475,6 +475,8 @@ def janitor():
 class Err(Exception):
     def __init__(self, code, msg): self.code = code; self.msg = msg
 
+GEO_CACHE, GEO_LOCK, GEO_LAST = {}, threading.Lock(), [0.0]
+
 class H(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
     server_version = 'nitka'
@@ -586,7 +588,7 @@ class H(BaseHTTPRequestHandler):
         if ctype.startswith('text/') or ctype in ('application/javascript',): ctype += '; charset=utf-8'
         with open(p, 'rb') as f: data = f.read()
         if rel == 'index.html':
-            v = int(max(os.path.getmtime(os.path.join(WEB, n)) for n in ('app.js', 'editor.js', 'style.css', 'index.html')))
+            v = int(max(os.path.getmtime(os.path.join(WEB, n)) for n in ('app.js', 'editor.js', 'planner.js', 'style.css', 'index.html')))
             data = data.replace(b'__V__', str(v).encode())
         self.send(200, data, ctype, cache='no-store' if rel == 'index.html' else ('public, max-age=31536000' if 'v' in q else 'public, max-age=604800'))
 
@@ -692,6 +694,55 @@ class H(BaseHTTPRequestHandler):
                              (pid, uid, role, time.time())); db().commit()
                 return self.send(200, dict(pid=pid, role=role))
             raise Err(404, 'Нет такого адреса.')
+        if a == ['catalog'] and m == 'GET':      # перевалы и вершины каталога в кадре — для планировщика
+            self.need_user()
+            try: la0, lo0, la1, lo1 = [float(x) for x in q['bbox'].split(',')]
+            except (KeyError, ValueError): raise Err(400, 'Нужен охват карты.')
+            if (la1 - la0) * (lo1 - lo0) > 6: return self.send(200, dict(items=[], wide=True))
+            try: cat = suggest.catalog()
+            except RuntimeError as e: raise Err(503, str(e))
+            out = []
+            for c in cat:
+                try: la, lo = float(c['latlon'][0]), float(c['latlon'][1])
+                except Exception: continue
+                if not (la0 <= la <= la1 and lo0 <= lo <= lo1): continue
+                summit = bool(c.get('is_summit')); raw = str(c.get('name') or '').strip()
+                try: h = int(float(c.get('elevation'))) if c.get('elevation') else None
+                except Exception: h = None
+                out.append(dict(id=str(c.get('id') or f'{la:.5f},{lo:.5f}'), kind='peak' if summit else 'pass', name=raw,
+                                title=(('в. ' if summit else 'пер. ') + raw) if raw else ('вершина' if summit else 'перевал'),
+                                grade=suggest.GR.get(str(c.get('grade_eng') or '').lower()), h=h, lat=round(la, 6), lon=round(lo, 6),
+                                note='; '.join(x for x in [str(c.get('connects') or '').strip(), ('склоны: ' + str(c['slopes']).strip()) if c.get('slopes') else ''] if x)[:200],
+                                alt=str(c.get('altnames') or '')[:80]))
+                if len(out) >= 1500: break
+            return self.send(200, dict(items=out), cache='private, max-age=3600')
+        if a == ['geocode'] and m == 'GET':      # «куда идём?» — поиск места по OpenStreetMap (Nominatim: не чаще раза в секунду)
+            self.need_user(); text = re.sub(r'\s+', ' ', q.get('q') or '').strip()[:120]
+            if len(text) < 2: return self.send(200, dict(items=[]))
+            if text.lower() in GEO_CACHE: return self.send(200, dict(items=GEO_CACHE[text.lower()]))
+            with GEO_LOCK:
+                wait = 1.05 - (time.time() - GEO_LAST[0])
+                if wait > 0: time.sleep(wait)
+                GEO_LAST[0] = time.time()
+                try:
+                    url = 'https://nominatim.openstreetmap.org/search?' + urllib.parse.urlencode(dict(q=text, format='jsonv2', limit=7, **{'accept-language': 'ru'}))
+                    with urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': mapkit.UA}), timeout=12) as r: res = json.loads(r.read())
+                except Exception: raise Err(503, 'Поиск мест сейчас не отвечает — найди место на карте сам.')
+            items = []
+            for x in res:
+                try: bb = [float(v) for v in x.get('boundingbox') or []]
+                except ValueError: bb = []
+                items.append(dict(name=x.get('display_name', '')[:160], lat=float(x['lat']), lon=float(x['lon']), kind=x.get('type') or '', bbox=bb if len(bb) == 4 else None))
+            if len(GEO_CACHE) > 2000: GEO_CACHE.clear()
+            GEO_CACHE[text.lower()] = items
+            return self.send(200, dict(items=items))
+        if a == ['elev'] and m == 'POST':      # высоты по рельефу — профиль в планировщике
+            self.need_user()
+            try: pts = [[float(x[0]), float(x[1])] for x in (self.json().get('pts') or [])][:8000]
+            except (TypeError, ValueError, IndexError): raise Err(400, 'Неверные точки.')
+            if not pts: return self.send(200, dict(ele=[]))
+            try: return self.send(200, dict(ele=planner.elevations(pts)))
+            except RuntimeError as e: raise Err(503, str(e))
         if a == ['projects'] and m == 'POST':
             uid = self.need_user(); d = self.json()
             if db().execute('SELECT COUNT(*) FROM projects WHERE user_id=?', (uid,)).fetchone()[0] >= 300: raise Err(400, 'Слишком много походов — удалите ненужные.')
@@ -828,6 +879,10 @@ class H(BaseHTTPRequestHandler):
                 proj['variants'] = [v for v in proj.get('variants', []) if v['id'] in used]
                 self.save(pid, proj, why=msg.lower() if len(msg) < 60 else 'варианты маршрута')
                 return self.send(200, dict(project=for_client(proj), msg=msg))
+            if sub == 'plan' and m == 'POST':      # маршрут из планировщика → куски по дням, ночёвки, перевалы
+                r = planner.apply(proj, self.json().get('plan') or {})
+                if r['ok']: self.save(pid, proj, why='маршрут из планировщика')
+                return self.send(200, dict(project=for_client(proj), **r))
             if sub == 'day-radial' and m == 'POST':      # весь день — радиальный выход (куски склеиваются в один)
                 try: day = int(self.json().get('day'))
                 except (TypeError, ValueError): raise Err(400, 'Не указан день.')

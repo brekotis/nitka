@@ -103,7 +103,8 @@ async function route() {
     return;
   }
   await flush();
-  S.pid = null; S.proj = null; S.hist = null; stopPoll(); clearInterval(revT); destroyMap();
+  if (S.planner && PLN) PLN.close();
+  S.pid = null; S.proj = null; S.hist = null; S.planner = false; stopPoll(); clearInterval(revT); destroyMap();
   if (location.hash.startsWith('#/admin') && S.user.admin) return renderAdmin();
   await loadProjects(); render();
 }
@@ -377,12 +378,16 @@ function newProject() {
     <form class="sec" id="np"><label class="field"><span>Название</span><input name="title" type="text" placeholder="например: Сванетия, август 2026" maxlength="100" required></label>
     <div class="field"><span>Вид похода</span><div class="chips">${KINDS.map((k, i) => `<label class="chip${i ? '' : ' on'}"><input type="radio" name="kind" value="${k}" ${i ? '' : 'checked'} hidden>${k}</label>`).join('')}</div>
     <div class="hint">У горного километраж сразу считается с коэффициентом 1,2 — это можно поменять.</div></div>
+    <div class="field"><span>С чего начнём</span><div class="startw">
+      <label class="startc on"><input type="radio" name="how" value="load" checked hidden><b>Загружу трек</b><span>GPX, KML или ссылка nakarte — поход уже пройден или маршрут нарисован в другом месте</span></label>
+      <label class="startc"><input type="radio" name="how" value="plan" hidden><b>Нарисую маршрут</b><span>по точкам на карте, по тропам или напрямую, с перевалами из каталога</span></label></div></div>
     <div class="acts"><button type="button" class="btn ghost" data-x>Отмена</button><button class="btn go">Создать</button></div></form>`, (v, close) => {
+    $$('.startc', v).forEach(c => c.onclick = () => { $$('.startc', v).forEach(x => x.classList.remove('on')); c.classList.add('on'); });
     $('[data-x]', v).onclick = close;
     $$('.chip', v).forEach(c => c.onclick = () => { $$('.chip', v).forEach(x => x.classList.remove('on')); c.classList.add('on'); });
     $('#np', v).onsubmit = async e => {
       e.preventDefault();
-      try { const d = await api('POST', '/api/projects', { title: e.target.title.value, kind: e.target.kind.value }, false, 'Создаю поход…'); close(); go(`#/p/${d.id}/tracks`); } catch (err) { fail(err); }
+      try { const d = await api('POST', '/api/projects', { title: e.target.title.value, kind: e.target.kind.value }, false, 'Создаю поход…'); close(); S.planNext = e.target.how.value === 'plan'; go(`#/p/${d.id}/tracks`); } catch (err) { fail(err); }
     };
   });
 }
@@ -414,6 +419,7 @@ async function openProject(pid, step) {
     destroyAtlas(); renderEditor();
     if (['running', 'queued'].includes(S.build.state)) startPoll();
     startRevPoll();
+    if (S.planNext) { S.planNext = false; setTimeout(openPlanner, 300); }
   } catch (e) { fail(e); S.pid = null; S.share = null; go('#/'); }
 }
 // Ссылка «поделиться»: вошедший — сразу в поход (он появляется в его списке); без входа — смотреть можно, править — войдя
@@ -655,6 +661,25 @@ async function editor() {
     onClose: () => { S.mode = null; if (S.mapTemp) { S.mapTemp = null; applyMapSize(); } paintPanel(); } });
   return ED;
 }
+let PLN = null;
+async function plannerMod() {
+  if (PLN) return PLN;
+  const m = await import(`./planner.js?v=${APPV}`);
+  PLN = m.createPlanner({ L, getMap: () => map, api, toast, esc, confirmBox, sym, gcol: () => S.gcol || {}, pid: () => S.pid, proj: () => S.proj,
+    repaint: () => { const a = document.activeElement; if (a && a.closest && a.closest('#panel') && a.matches('input,select')) { a.addEventListener('blur', () => setTimeout(() => S.planner && paintPanel(), 0), { once: true }); return; } if (S.planner) paintPanel(); },
+    onDone: r => { S.proj = r.project; S.lastInfo = null; go(`#/p/${S.pid}/days`); setTimeout(() => drawMap(true), 50); },
+    onClose: () => { S.planner = false; S.mode = null; hintOff(); if (S.mapTemp) { S.mapTemp = null; applyMapSize(); } paintEditor(); } });
+  return PLN;
+}
+async function openPlanner() {
+  if (!map) return toast('Карта ещё не открылась', true);
+  await flush(); setMode(null); hintOff(); if (S.hist) closeHist(true);
+  const p = await plannerMod();
+  if (S.step === 'maps') { S.step = 'tracks'; history.replaceState(null, '', `#/p/${S.pid}/tracks`); }
+  S.planner = true; S.mode = 'plan'; paintEditor();
+  if (isPhone() && mapSize() !== 'big') { S.mapTemp = 'big'; applyMapSize(); }
+  p.open(); drawPieces();
+}
 async function openEditor(pieceId, opts) {
   if (!map) return toast('Карта ещё не открылась', true);
   setMode(null); hintOff();
@@ -824,7 +849,7 @@ document.addEventListener('scroll', () => updMore(), true);
 window.addEventListener('resize', () => updMore());
 function paintEditor(fit) {
   if (!S.proj) return;
-  const body = $('.ed-body'); const wide = S.step === 'maps' && !S.hist && S.role !== 'view';
+  const body = $('.ed-body'); const wide = S.step === 'maps' && !S.hist && !S.planner && S.role !== 'view';
   body.classList.toggle('wide', wide);
   const idx = STEPS.findIndex(s => s[0] === S.step);
   $$('.step').forEach(b => { const i = STEPS.findIndex(s => s[0] === b.dataset.step); b.classList.toggle('on', i === idx); b.classList.toggle('done', i < idx); });
@@ -835,10 +860,10 @@ function paintEditor(fit) {
 function paintPanel(top) {
   const el = $('#panel'); if (!el) return;
   const y = el.scrollTop; const out = $('.out'); const y2 = out ? out.scrollTop : 0;
-  const own = S.role === 'view' || S.hist;      // страница просмотра или журнал — вместо шага
+  const own = S.role === 'view' || S.hist || S.planner;      // страница просмотра, журнал или планировщик — вместо шага
   el.className = S.step === 'maps' && !own ? 'build-host' : 'panel';
   el.style.cssText = S.step === 'maps' && !own ? 'overflow:hidden;min-height:0;display:block;height:100%' : '';
-  el.innerHTML = S.role === 'view' ? viewerPanel() : S.hist ? historyPanel() : ({ tracks: stepTracks, days: stepDays, points: stepPoints, maps: stepMaps })[S.step]();
+  el.innerHTML = S.role === 'view' ? viewerPanel() : S.planner && PLN ? PLN.panel() : S.hist ? historyPanel() : ({ tracks: stepTracks, days: stepDays, points: stepPoints, maps: stepMaps })[S.step]();
   if (!top) { el.scrollTop = y; const o = $('.out'); if (o) o.scrollTop = y2; } else el.scrollTop = 0;
   if (S.step === 'tracks') bindDrop();
   markSteps();
@@ -867,7 +892,10 @@ function infoText(i) {
 }
 function stepTracks() {
   const pr = P(); const has = pr.pieces.length > 0; const i = S.lastInfo;
+  const planned = !!(pr.plan && pr.plan.pts && pr.plan.pts.length);
   return `<h2>Треки</h2><p>Загрузи нитку маршрута — одним файлом, по дням или ссылкой. Ночёвки, перевалы и другие точки подтянутся вместе с ней.</p>
+    <div class="plancta${has && !planned ? ' small' : ''}"><div><b>${planned ? 'Маршрут нарисован в планировщике' : 'Трека ещё нет? Нарисуй маршрут'}</b><div class="hint">${planned ? 'Поменять точки, ночёвки, перевалы — там же; дни пересоберутся сами.' : 'По ключевым точкам — по тропам или напрямую, с перевалами из каталога. Километры и набор — сразу.'}</div></div>
+      <button class="btn ${has && !planned ? '' : 'go'}" data-a="plan">✎ ${planned ? 'Изменить маршрут' : 'Нарисовать маршрут'}</button></div>
     ${i ? `<div class="banner ok"><div><b>Нашёл:</b> ${esc(infoText(i))}.</div><div class="hint">${i.assigned === i.pieces - i.skipped ? 'Все треки разложились по дням сами.' : (i.unassigned ? `По дням не разложились: ${i.unassigned}. Это правится на шаге «Дни».` : '')}${i.skipped ? ` Дубли (${i.skipped}) отложены в сторону.` : ''}</div></div>` : ''}
     <div class="field"><span>Что загружаю</span><div class="seg sm even">${[['main', 'Основной', 'Основной маршрут'], ['alt', 'Запасной', 'Запасной вариант'], ['exit', 'Аварийный', 'Аварийный выход']].map(([v, t, title]) => `<button class="${(S.importAs || 'main') === v ? 'on' : ''}" data-a="importas" data-v="${v}" title="${title}">${t}</button>`).join('')}</div>
       <div class="hint">${(S.importAs || 'main') === 'main' ? 'Запасные и аварийные треки «Нитка» узнаёт и сама — по словам «запасной», «вариант», «обход», «аварийный», «сход» в названии.' : `Всё из следующей загрузки станет ${S.importAs === 'alt' ? 'запасным вариантом' : 'аварийным выходом'} — файл или ссылка nakarte.`}</div></div>
@@ -1403,6 +1431,7 @@ function nearestOnTrack(latlng) {
 async function mapClick(latlng) {
   if (!S.mode) return;
   if (S.mode === 'editor') return ED && ED.click(latlng);
+  if (S.mode === 'plan') return PLN && PLN.click(latlng);
   if (S.mode === 'draw') {      // вариант кликами; рядом с ниткой точка прилипает к ней — так вариант стыкуется с маршрутом
     const n = nearestOnTrack(latlng); const q = n && n.piece && !VAR_ROLE(n.piece.role) ? [n.lat, n.lon] : [+latlng.lat.toFixed(6), +latlng.lng.toFixed(6)];
     return addDrawPoint(q);
@@ -1500,6 +1529,8 @@ function drawPieces() {
   const draw = (p, style) => {
     const editing = ED && ED.active();
     if (editing && ED.has(p.id)) return;
+    if (S.planner && p.src === 'plan') return;      // нарисованное в планировщике — правится там
+    if (S.planner) style = { ...style, opacity: .4 };
     if (editing) style = { ...style, opacity: .45, weight: Math.max(style.weight || 4, 5) };      // в редакторе — бледные, на них можно нажать
     const ll = p.pts.map(q => [q[0], q[1]]);
     L.polyline(ll, { color: '#fff', weight: (style.weight || 4) + 3.5, opacity: editing ? .5 : .9, interactive: false }).addTo(pieceLayer);
@@ -1557,9 +1588,10 @@ const A = {
       if (a === 'del') confirmBox(mine ? 'Удалить поход?' : 'Убрать из моих походов?', mine ? `«${esc(p.title)}» исчезнет вместе с треками, собранными картами и журналом изменений${p.members ? ' — и у тех, с кем ты им поделился' : ''}. Вернуть будет нельзя.` : `«${esc(p.title)}» останется у ${esc(p.owner || 'владельца')} — вернуться можно по той же ссылке.`, mine ? 'Удалить' : 'Убрать',
         async () => { try { await api('DELETE', `/api/projects/${id}`); await loadProjects(); renderHome(); toast(mine ? 'Поход удалён' : 'Поход убран из твоего списка'); } catch (er) { fail(er); } }); };
   },
-  step(el) { if (S.hist) { closeHist(); if (el.dataset.step === S.step) return; } go(`#/p/${S.pid}/${el.dataset.step}`); },
+  step(el) { if (S.planner) return toast('Сначала «Готово — в поход» или «Отмена» в маршруте', true); if (S.hist) { closeHist(); if (el.dataset.step === S.step) return; } go(`#/p/${S.pid}/${el.dataset.step}`); },
+  plan() { openPlanner(); },
   share() { openShareBox(); },
-  history() { openHistory(); },
+  history() { if (S.planner) return toast('Сначала закончи с маршрутом', true); openHistory(); },
   histclose() { closeHist(); },
   hsel(el, ev) { if (ev.target.closest('button')) return; histSelect(+el.dataset.id); },
   hrestore(el) { histRestore(+el.dataset.id); },
