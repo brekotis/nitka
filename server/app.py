@@ -10,7 +10,8 @@ DATA = os.path.abspath(os.environ.get('NITKA_DATA') or os.path.join(ROOT, 'data'
 os.makedirs(DATA, exist_ok=True)
 os.environ.setdefault('NITKA_CACHE', os.path.join(DATA, 'cache'))
 sys.path.insert(0, ROOT)
-from engine import classify, importers, mapkit, suggest          # noqa: E402
+from engine import classify, importers, mapkit, model, suggest          # noqa: E402
+from engine import sheets as sheets_mod          # noqa: E402
 
 WEB = os.path.join(ROOT, 'web')
 RENDERS = os.path.join(DATA, 'renders')
@@ -129,6 +130,20 @@ def save_project(pid, uid, proj, create=False):
     else: c.execute('UPDATE projects SET title=?, json=?, card=?, updated=? WHERE id=? AND user_id=?', (proj['meta']['title'], js, card, now, pid, uid))
     c.commit()
 
+def for_client(proj):
+    """Проект для браузера: у кусков — что «Нитка» видит в них как в радиалке (форма и км). В базу это не пишется."""
+    out = dict(proj); pcs = []
+    for p in proj.get('pieces', []):
+        if p.get('role') == 'radial' or (p.get('role') == 'main' and len(p.get('pts', [])) > 2):
+            try:
+                r = [(q[0], q[1]) for q in p['pts']]
+                if p.get('role') == 'radial' or model.dist(r[0], r[-1]) < max(400.0, 0.05 * (p.get('km') or 0) * 1000):
+                    p = dict(p, rinfo=model.radial_summary(r))
+            except Exception: pass
+        pcs.append(p)
+    out['pieces'] = pcs
+    return out
+
 def merge_client(stored, incoming):
     """Клиент присылает проект без геометрии треков — точки ниток берутся из сохранённого."""
     geo = {p['id']: p for p in stored.get('pieces', [])}
@@ -140,6 +155,9 @@ def merge_client(stored, incoming):
         try: day = int(day) if day not in (None, '', 0) else None
         except Exception: day = None
         if day is not None and not 1 <= day <= 400: day = None
+        s = {k: v for k, v in s.items() if k not in ('shape', 'once')}
+        if p.get('shape') in ('back', 'loop', 'lolli'): s['shape'] = p['shape']      # форма радиалки, выбранная вручную
+        if isinstance(p.get('once'), bool): s['once'] = p['once']      # обратный путь этой радиалки: в одну сторону или нет (иначе — как во всём походе)
         out.append(dict(s, name=str(p.get('name') or s['name'])[:120], day=day, role=p.get('role') if p.get('role') in ('main', 'radial', 'skip') else 'main',
                         order=p.get('order', s.get('order', 0))))
     pts = []
@@ -170,7 +188,8 @@ def merge_client(stored, incoming):
     sheets = dict(stored.get('sheets', {}))
     for k, v in (incoming.get('sheets') or {}).items():
         if k in ('region', 'overview', 'work', 'days', 'profile', 'photos', 'logo'): sheets[k] = bool(v)
-        elif k == 'work_scale' and v in (50000, 100000): sheets[k] = v
+        elif k == 'work_scale' and v in (50000, 100000, 200000): sheets[k] = v
+        elif k == 'scheme' and v in ('auto', 'sheet', 'overview', 'none'): sheets[k] = v
         elif k == 'base' and v in ('gsh', 'otm'): sheets[k] = v
         elif k == 'adjust' and isinstance(v, dict):
             adj = {}
@@ -477,7 +496,7 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, dict(id=pid))
         if len(a) >= 2 and a[0] == 'projects':
             uid, proj, row = self.project(a[1]); pid = a[1]; sub = a[2] if len(a) > 2 else ''
-            if not sub and m == 'GET': return self.send(200, dict(project=proj, build=build_status(pid), updated=row['updated']))
+            if not sub and m == 'GET': return self.send(200, dict(project=for_client(proj), build=build_status(pid), updated=row['updated']))
             if not sub and m == 'PUT':
                 proj = merge_client(proj, self.json()); save_project(pid, uid, proj)
                 return self.send(200, dict(ok=True, card=card_of(proj)))
@@ -504,17 +523,17 @@ class H(BaseHTTPRequestHandler):
                 if sum(len(s) for L in layers for s in L['segs']) > 1500000: raise Err(400, 'Слишком большой трек.')
                 info = classify.merge_import(proj, layers, name)
                 save_project(pid, uid, proj)
-                return self.send(200, dict(project=proj, info=info))
+                return self.send(200, dict(project=for_client(proj), info=info))
             if sub == 'source-delete' and m == 'POST':
                 classify.remove_source(proj, str(self.json().get('id') or '')); save_project(pid, uid, proj)
-                return self.send(200, dict(project=proj))
+                return self.send(200, dict(project=for_client(proj)))
             if sub == 'cut' and m == 'POST':
                 d = self.json()
                 try: lat, lon = float(d['lat']), float(d['lon'])
                 except (KeyError, TypeError, ValueError): raise Err(400, 'Не понял, где резать.')
                 r = classify.cut_piece(proj, str(d.get('piece') or ''), lat, lon)
                 if r['ok']: save_project(pid, uid, proj)
-                return self.send(200, dict(project=proj, **r))
+                return self.send(200, dict(project=for_client(proj), **r))
             if sub == 'suggest' and m == 'POST':
                 what = str(self.json().get('what') or '')
                 try:
@@ -525,11 +544,11 @@ class H(BaseHTTPRequestHandler):
             if sub == 'chain-order' and m == 'POST':
                 n = classify.chain_order(proj)
                 if n: save_project(pid, uid, proj)
-                return self.send(200, dict(project=proj, changed=n))
+                return self.send(200, dict(project=for_client(proj), changed=n))
             if sub == 'split-by-camps' and m == 'POST':
                 r = classify.split_by_camps(proj)
                 if r['ok']: save_project(pid, uid, proj)
-                return self.send(200, dict(project=proj, **r))
+                return self.send(200, dict(project=for_client(proj), **r))
             if sub == 'build' and m == 'POST':
                 d = self.json()
                 if not any(p.get('role') != 'skip' for p in proj.get('pieces', [])): raise Err(400, 'Сначала загрузите трек.')
@@ -539,6 +558,9 @@ class H(BaseHTTPRequestHandler):
                 if not enqueue(pid, proj, only): raise Err(409, 'Этот поход уже собирается.')
                 return self.send(200, dict(ok=True, build=build_status(pid)))
             if sub == 'status' and m == 'GET': return self.send(200, build_status(pid))
+            if sub == 'sheet-counts' and m == 'GET':      # сколько рабочих листов даст каждый масштаб — для кнопок на шаге «Карты»
+                try: return self.send(200, dict(counts=sheets_mod.work_counts(model.Trip(proj))))
+                except ValueError: return self.send(200, dict(counts={}))
             if sub == 'zip' and m == 'GET': return self.zip(pid, proj, q.get('fmt') or 'png')
         raise Err(404, 'Нет такого адреса.')
 

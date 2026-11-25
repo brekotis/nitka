@@ -395,9 +395,31 @@ function daysModel() {
   const days = []; for (let n = 1; n <= max; n++) days.push({ n, pieces: used.filter(p => p.day === n) });
   return { days, loose: used.filter(p => !p.day), skipped: P().pieces.filter(p => p.role === 'skip'), max };
 }
+// Радиалка: форма (туда-обратно / кольцо / подход + кольцо) и км пути туда и обратного пути — их считает сервер (rinfo)
+const RFORM = { back: 'туда-обратно', loop: 'кольцо', lolli: 'подход + кольцо' };
+const radAuto = p => { const a = p.rinfo && p.rinfo.auto; return a === 'loop' ? 'loop' : a === 'lolli' ? 'lolli' : 'back'; };
+const radShape = p => (p.shape && (!p.rinfo || p.rinfo.opts[p.shape]) ? p.shape : radAuto(p));
+const radOnce = p => (typeof p.once === 'boolean' ? p.once : P().meta.radial_one_way !== false);
+function radKm(p) {      // [путь туда, обратный путь], км
+  const o = p.rinfo && p.rinfo.opts[radShape(p)];
+  if (o) return o;
+  return radShape(p) === 'loop' ? [p.km || 0, 0] : [p.km || 0, p.km || 0];
+}
 function dayKm(pieces) {
-  const k = P().meta.kcoef || 1, one = P().meta.radial_one_way !== false, hasMain = pieces.some(p => p.role === 'main');
-  return pieces.reduce((s, p) => s + (p.km || 0) * (p.role === 'radial' && hasMain && !one ? 2 : 1), 0) * k;
+  const k = P().meta.kcoef || 1;
+  return pieces.reduce((s, p) => { if (p.role !== 'radial') return s + (p.km || 0); const [o, b] = radKm(p); return s + o + (radOnce(p) ? 0 : b); }, 0) * k;
+}
+function radialCtl(p) {
+  if (p.role !== 'radial') return '';
+  const cur = radShape(p), opts = p.rinfo ? Object.keys(p.rinfo.opts) : ['back', 'loop'], manual = p.shape && p.shape !== radAuto(p);
+  const [o, b] = radKm(p), once = radOnce(p), dflt = typeof p.once !== 'boolean';
+  const q = cur === 'lolli' ? `Подход ${km(b)} км пройден туда и обратно по одной тропе. Считать его один раз?`
+    : cur === 'loop' ? '' : p.rinfo && p.rinfo.auto === 'recorded' ? `Обратный путь ${km(b)} км записан по своим же следам. Считать его?`
+    : `Обратный путь — тем же путём, ${km(b)} км. Считать его?`;
+  return `<div class="rad"><span class="seg sm">${opts.map(v => `<button class="${v === cur ? 'on' : ''}" data-a="pshape" data-id="${p.id}" data-v="${v}">${{ back: '⇄', loop: '↻', lolli: '⤳↻' }[v]} ${RFORM[v]}</button>`).join('')}</span>
+    <span class="hint">${p.rinfo ? (manual ? `выбрано вручную · «Нитка» видит: ${RFORM[radAuto(p)]}` : 'форма определена по треку') : ''}</span>
+    ${cur === 'loop' ? `<div class="hint">Кольцо идёт в километраж целиком, обратного пути нет: ${km(o)} км.</div>`
+      : b > 0.05 ? `<div class="rq"><span>${q}</span><span class="seg sm"><button class="${once ? 'on' : ''}" data-a="ponce" data-id="${p.id}" data-v="1">Один раз</button><button class="${once ? '' : 'on'}" data-a="ponce" data-id="${p.id}" data-v="0">Туда и обратно</button></span>${dflt ? '<span class="hint">как во всём походе</span>' : ''}</div>` : ''}</div>`;
 }
 
 // ---------------------------------------------------------------- редактор: каркас
@@ -520,7 +542,7 @@ function pieceRow(p, maxDay) {
   return `<div class="pc${S.selPiece === p.id ? ' sel' : ''}" data-a="piece" data-id="${p.id}"><span class="nm">${esc(p.name)}</span><span class="num hint">${km(p.km || 0)} км</span>
     <span class="ctl"><span class="hint">день</span><input type="number" min="1" max="${maxDay + 30}" value="${p.day || ''}" data-c="pday" data-id="${p.id}" aria-label="День">
     <select data-c="prole" data-id="${p.id}" aria-label="Что это"><option value="main"${p.role === 'main' ? ' selected' : ''}>основная нитка</option><option value="radial"${p.role === 'radial' ? ' selected' : ''}>радиальный выход</option><option value="skip"${p.role === 'skip' ? ' selected' : ''}>не использовать</option></select>
-    <span class="sp" style="flex:1"></span><button class="icon-btn" data-a="pmove" data-id="${p.id}" data-d="-1" title="Раньше">${I.up}</button><button class="icon-btn" data-a="pmove" data-id="${p.id}" data-d="1" title="Позже">${I.down}</button></span></div>`;
+    <span class="sp" style="flex:1"></span><button class="icon-btn" data-a="pmove" data-id="${p.id}" data-d="-1" title="Раньше">${I.up}</button><button class="icon-btn" data-a="pmove" data-id="${p.id}" data-d="1" title="Позже">${I.down}</button></span>${radialCtl(p)}</div>`;
 }
 function stepDays() {
   const pr = P(); const M = daysModel(); const k = pr.meta.kcoef || 1;
@@ -789,6 +811,28 @@ function newType(q) {
 // ---------------------------------------------------------------- шаг 4: карты
 const SHEET_OPTS = [['region', 'Район похода', 'мелкая карта: где это вообще'], ['overview', 'Обзорная карта', 'вся нитка, ночёвки, перевалы по номерам'], ['profile', 'Высотный профиль маршрута', 'все дни на одном графике'],
   ['work', 'Рабочая карта', 'листы по ходу маршрута с сеткой'], ['days', 'Карты дней с профилем', 'по листу на каждый ходовой день']];
+// Сколько рабочих листов даст каждый масштаб: спрашиваем сервер, когда меняется нитка (дни, роли, формы радиалок)
+function workCounts() {
+  const pr = P(); const key = S.pid + '|' + pr.pieces.map(p => [p.id, p.day, p.role, p.shape || ''].join(':')).join(',');
+  if (S.wcKey !== key) {
+    S.wcKey = key;
+    flush().then(() => api('GET', `/api/projects/${S.pid}/sheet-counts`, undefined, false, false))
+      .then(d => { if (S.wcKey === key) { S.wc = d.counts || {}; if (S.step === 'maps') paintPanel(); } }).catch(() => { /* без чисел */ });
+  }
+  return S.wcKey === key ? (S.wc || {}) : {};
+}
+const nSheets = n => `${n} ${plural(n, 'лист', 'листа', 'листов')}`;
+function workScaleField(sh) {
+  const cur = sh.work_scale || 100000, wc = workCounts(), n = wc[cur];
+  const chips = [[50000, '1:50 000'], [100000, '1:100 000'], [200000, '1:200 000']].map(([v, t]) =>
+    `<button class="chip${cur === v ? ' on' : ''}" data-a="wscale" data-v="${v}">${t}${wc[v] ? ` <small>${nSheets(wc[v])}</small>` : ''}</button>`).join('');
+  const tip = cur !== 200000 && wc[cur] > 8 && wc[200000] < wc[cur]
+    ? `<div class="hint">Маршрут длинный: на ${cur === 50000 ? '1:50 000' : '1:100 000'} выходит ${nSheets(wc[cur])}. На 1:200 000 — ${nSheets(wc[200000])}, подписи и линии на печати того же размера.</div>` : '';
+  const sm = sh.scheme || 'auto', auto = n > 4 ? 'отдельным листом' : 'на обзорной';
+  const scheme = n > 1 ? `<div class="field"><span>Схема листов рабочей карты</span><div class="chips">${[['auto', 'Сама'], ['sheet', 'Отдельным листом'], ['overview', 'На обзорной'], ['none', 'Не показывать']].map(([v, t]) =>
+    `<button class="chip${sm === v ? ' on' : ''}" data-a="scheme" data-v="${v}">${t}</button>`).join('')}</div>${sm === 'auto' ? `<div class="hint">Сейчас — ${auto}: ${n > 4 ? 'рамки стольких листов на обзорной закрыли бы маршрут' : 'листов немного, рамки на обзорной не мешают'}.</div>` : ''}</div>` : '';
+  return `<div class="field"><span>Масштаб рабочей карты</span><div class="chips">${chips}</div>${tip}</div>${sh.work !== false ? scheme : ''}`;
+}
 function stepMaps() {
   const pr = P(); const sh = pr.sheets || {}; const b = S.build || { state: 'none', sheets: [] };
   const running = ['running', 'queued'].includes(b.state); const sheets = b.sheets || []; const ok = sheets.filter(s => s.state === 'ok');
@@ -800,7 +844,7 @@ function stepMaps() {
       <h2>Карты</h2><p>Что собрать и как подписать. Всё рисуется в 300 dpi — для печати в масштабе 100 %.</p>
       <label class="field"><span>Район — для заголовков карт</span><input type="text" data-c="area" value="${esc(pr.meta.area || '')}" maxlength="80" placeholder="например: Сванетия, Центральный Кавказ"></label>
       <div class="sec"><h3>Листы</h3>${SHEET_OPTS.map(([id, t, s]) => `<label class="switch"><input type="checkbox" data-c="sheet" data-f="${id}" ${sh[id] !== false ? 'checked' : ''}><span><b>${t}</b><div class="hint">${s}</div></span></label>`).join('')}</div>
-      <div class="field"><span>Масштаб рабочей карты</span><div class="chips">${[[100000, '1:100 000'], [50000, '1:50 000']].map(([v, t]) => `<button class="chip${(sh.work_scale || 100000) === v ? ' on' : ''}" data-a="wscale" data-v="${v}">${t}</button>`).join('')}</div></div>
+      ${workScaleField(sh)}
       <div class="field"><span>Основа</span><div class="chips">${[['otm', 'OpenTopoMap'], ['gsh', 'Генштаб и ГГЦ, где есть']].map(([v, t]) => `<button class="chip${(sh.base || 'otm') === v ? ' on' : ''}" data-a="sbase" data-v="${v}">${t}</button>`).join('')}</div>
         <div class="hint">OpenTopoMap есть везде. Генштаб подробнее в горах, но покрывает не всё — где его нет, подставится OpenTopoMap.</div></div>
       ${pr.points.some(q => q.type === 'photo') ? `<label class="switch"><input type="checkbox" data-c="sheet" data-f="photos" ${sh.photos !== false ? 'checked' : ''}>Фототочки на картах дней и рабочих листах</label>` : ''}
@@ -1008,7 +1052,7 @@ function drawPieces() {
   };
   const ps = P().pieces;
   ps.filter(p => p.role === 'skip').forEach(p => draw(p, { color: '#8A97A8', weight: 2, dashArray: '2 6', opacity: .7 }));
-  ps.filter(p => p.role !== 'skip').forEach(p => draw(p, { color: !p.day && ps.some(x => x.day) ? '#F68A1D' : ((p.day || 1) % 2 ? RED : VIOLET), weight: S.selPiece === p.id ? 6.5 : 4, dashArray: p.role === 'radial' ? '8 7' : null }));
+  ps.filter(p => p.role !== 'skip').forEach(p => draw(p, { color: !p.day && ps.some(x => x.day) ? '#F68A1D' : ((p.day || 1) % 2 ? RED : VIOLET), weight: S.selPiece === p.id ? 6.5 : 4, dashArray: p.role === 'radial' && radShape(p) !== 'loop' ? '8 7' : null }));
 }
 function drawPoints() {
   if (!pointLayer) return; pointLayer.clearLayers(); markers = {};
@@ -1142,18 +1186,26 @@ const A = {
     if (m === 'del') return confirmBox('Удалить все точки папки?', `Из похода уйдут все точки папки «${esc(S.folder)}».`, 'Удалить', () => { P().points = P().points.filter(q => !inF(q)); S.folder = ''; dirty(); paintPanel(); drawPoints(); });
     P().points.filter(inF).forEach(q => { q.on_map = m === 'show'; }); dirty(); paintPanel(); drawPoints(); },
   wscale(el) { P().sheets.work_scale = +el.dataset.v; dirty(); paintPanel(); },
+  scheme(el) { P().sheets.scheme = el.dataset.v; dirty(); paintPanel(); },
   sbase(el) { P().sheets.base = el.dataset.v; dirty(); paintPanel(); },
   build() { build(); },
   tosettings() { const p = $('.build .panel'); p && p.scrollIntoView({ behavior: 'smooth' }); },
   view(el, ev) { if (ev.target.closest('[data-stop]')) return; lightbox(+el.dataset.i); },
 };
+A.pshape = el => { const p = pieceById(el.dataset.id), v = el.dataset.v; if (v === radAuto(p)) delete p.shape; else p.shape = v; dirty(); paintPanel(); drawPieces(); };
+A.ponce = el => { const p = pieceById(el.dataset.id), v = el.dataset.v === '1'; if (v === (P().meta.radial_one_way !== false)) delete p.once; else p.once = v; dirty(); paintPanel(); };
 const C = {
   title(el) { P().meta.title = el.value; document.title = (el.value || 'Поход') + ' — Нитка'; dirty(); },
   start(el) { P().meta.start_date = el.value || null; dirty(); paintPanel(); },
   kcoef(el, final) { const v = Math.min(3, Math.max(1, +String(el.value).replace(',', '.') || 1)); P().meta.kcoef = v; dirty(); if (final) paintPanel(); },
   oneway(el) { P().meta.radial_one_way = el.checked; dirty(); paintPanel(); },
   pday(el, final) { const p = pieceById(el.dataset.id); const v = parseInt(el.value, 10); p.day = v >= 1 ? v : null; dirty(); if (final) { paintPanel(); drawPieces(); } },
-  prole(el) { pieceById(el.dataset.id).role = el.value; dirty(); paintPanel(); drawPieces(); },
+  async prole(el) {
+    const p = pieceById(el.dataset.id); p.role = el.value; dirty(); paintPanel(); drawPieces();
+    if (p.role === 'radial' && !p.rinfo) {      // форму новой радиалки считает сервер — подтягиваем её
+      try { await flush(); const d = await api('GET', `/api/projects/${S.pid}`, undefined, false, false); const q = d.project.pieces.find(x => x.id === p.id); if (q && q.rinfo) { p.rinfo = q.rinfo; paintPanel(); drawPieces(); } } catch (e) { /* покажем без подсказки */ }
+    }
+  },
   q(el) { S.q = el.value; const y = $('#panel').scrollTop; const list = $('#plist'); const tmp = document.createElement('div'); tmp.innerHTML = stepPoints(); list.replaceWith($('#plist', tmp)); $('#panel').scrollTop = y; },
   folder(el) { S.folder = el.value; paintPanel(); },
   ptype(el) { const q = pointById(el.dataset.id); if (el.value === '__new') return newType(q);

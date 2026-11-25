@@ -5,7 +5,7 @@ Builder(trip, out_dir, opts).plan() → список листов; .render(id) �
 import math, os
 from PIL import Image, ImageDraw, ImageChops
 from . import mapkit as mk, profile as prof
-from .mapkit import font, mm, INK, View, Overlay, Sheet, g_track, g_dash, g_sym, g_band
+from .mapkit import font, mm, INK, View, Overlay, Sheet, g_track, g_dash, g_sym, g_band, g_frame, DAY_COLORS
 from .model import GRADE_COL
 from .classify import GRADES, dist
 
@@ -41,6 +41,32 @@ def stamp_logo(path, h_mm=12.0):
     return img.width / mk.DPI * 2.54, img.height / mk.DPI * 2.54
 
 def scale_txt(sc): return f'1:{sc:,}'.replace(',', ' ')
+
+WORK_FIELD = (15.3, 18.4)      # поле рабочего листа, см
+WORK_SCALES = (50000, 100000, 200000)
+
+def work_chunks(T, sc, KX, KY):
+    """Нарезка нитки на рабочие листы: жадно по ходу маршрута, с полем 0,8 см. [(lat, lon центра, [дни])]."""
+    FW, FH = WORK_FIELD; f = sc / 100000.0
+    SEQ = [(d, p) for d in T.DAYS for s in T.day_lines(d) for p in s]
+    out = []; i = 0
+    while i < len(SEQ):
+        j = i; a0 = a1 = SEQ[i][1][0]; b0 = b1 = SEQ[i][1][1]
+        while j + 1 < len(SEQ):
+            la, lo = SEQ[j + 1][1]
+            na0, na1, nb0, nb1 = min(a0, la), max(a1, la), min(b0, lo), max(b1, lo)
+            if (nb1 - nb0) * KX > (FW - 1.6) * f or (na1 - na0) * KY > (FH - 1.6) * f: break
+            a0, a1, b0, b1 = na0, na1, nb0, nb1; j += 1
+        out.append(((a0 + a1) / 2, (b0 + b1) / 2, sorted({SEQ[k][0] for k in range(i, j + 1)})))
+        if j + 1 >= len(SEQ): break
+        i = j + 1
+    return out
+
+def work_counts(T):
+    """Сколько рабочих листов даст каждый масштаб — для кнопок на шаге «Карты»."""
+    la0, la1, lo0, lo1 = bbox(T.all_pts())
+    KX = 111.32 * math.cos(math.radians((la0 + la1) / 2)); KY = 111.13
+    return {sc: len(work_chunks(T, sc, KX, KY)) for sc in WORK_SCALES}
 def per_cm(sc): return f'в 1 сантиметре {sc // 100} м' if sc < 100000 else f'в 1 сантиметре {sc / 100000:g} км'.replace('.', ',')
 
 
@@ -56,7 +82,7 @@ class Builder:
         self.area = (T.meta.get('area') or T.meta.get('title') or '').strip()
         self.year = T.year()
         self.tot = T.totals()
-        self.has_rad = any(D['rad'] and D['mains'] for D in T.DAYS.values()) and T.one_way
+        self.has_rad = any(D['mains'] and any(f != 'loop' and o for f, o in zip(D['rform'], D['ronce'])) for D in T.DAYS.values())
         k = T.kcoef
         kx = f' × {km(k)}' if abs(k - 1) > 1e-6 else ''
         rad = 'радиальные выходы — в одну сторону' if self.has_rad else ''
@@ -81,7 +107,7 @@ class Builder:
             return dict(layers=['otm'] + [('otm', z - k) for k in (1, 2, 3, 4) if z - k >= 6], z=z, src='Основа: OpenTopoMap (© OpenStreetMap, SRTM).', lighten=0.14 if sc < 1000000 else 0.22, shade=0.0, shade_z=12)
         # зум мозаики, какие карты брать в первую очередь (тыс.), зум отмывки
         z, prefer, sz = {10000: (17, 50, 13), 25000: (16, 50, 13), 50000: (15, 50, 13), 100000: (14, 100, 12),
-                         200000: (13, 100, 12), 300000: (12, 100, 11), 500000: (11, 200, 10)}[sc]
+                         200000: (13, 200, 12), 300000: (12, 100, 11), 500000: (11, 200, 10)}[sc]
         layers = mk.topo_chain(min(z, 15), prefer, max_up=2 if sc <= 50000 else 3)
         zo = min(z, 15)      # где топокарт нет совсем — OpenTopoMap; под ним — он же, но мельче
         layers = layers + [('otm', zo)] + [('otm', zo - k) for k in (1, 2, 3) if zo - k >= 6]
@@ -126,6 +152,7 @@ class Builder:
         T = self.T; o = self.o; P = []
         if o.get('region', True): P.append(dict(id='region', title='Район похода', file='00_rayon.png'))
         if o.get('overview', True): P.append(dict(id='overview', title='Обзорная карта', file='01_obzornaya_karta.png'))
+        if self.scheme_mode() == 'sheet': P.append(dict(id='scheme', title='Схема рабочей карты', file='01b_shema_listov.png'))
         if o.get('profile', True): P.append(dict(id='profile', title='Высотный профиль маршрута', file='02_profil_marshruta.png'))
         if o.get('work', True):
             n = len(self.chunks())
@@ -139,6 +166,7 @@ class Builder:
     def render(self, sid):
         if sid == 'region': return self.region()
         if sid == 'overview': return self.overview()
+        if sid == 'scheme': return self.scheme()
         if sid == 'profile': return self.full_profile()
         if sid.startswith('work-'): return self.sheet(int(sid[5:]))
         if sid.startswith('day-'): return self.day(int(sid[4:]))
@@ -335,7 +363,7 @@ class Builder:
             if any(v.inside(*p, pad=40) for p in b['pts'][::4] + b['pts'][-1:]): ov.band(b['pts'], b['color'], 4.0 if v.scale <= 100000 else 2.8, b['hatch'])
         for d in T.DAYS:                                   # соседние дни — серым
             if focus and d != focus:
-                for s in T.day_lines(d): ov.line(s, (120, 120, 120), 0.45, casing=(255, 255, 255), casing_mm=0.2, dash=(1.6, 0.8))
+                for s in T.day_lines(d): ov.line(s, (140, 146, 154), 0.4, casing=(255, 255, 255), casing_mm=0.15)
         for a, b, p, q in T.TRANSFERS:
             if not focus or focus in (a, b): ov.line([p, q], GREY, 0.45, casing=(255, 255, 255), casing_mm=0.2, dash=(0.7, 0.8))
         for d, p, q in T.GAPS:
@@ -343,11 +371,14 @@ class Builder:
         for d in T.DAYS:
             if focus and d != focus: continue
             D = T.DAYS[d]
-            for r in D['rad']:
-                if D['mains'] and T.one_way: ov.line(r, dcol(d), w * 0.8, casing=(255, 255, 255), casing_mm=0.3, dash=(1.8, 0.9))
+            for r, f, o in zip(D['rad'], D['rform'], D['ronce']):
+                if D['mains'] and o and f != 'loop': ov.line(r, dcol(d), w * 0.8, casing=(255, 255, 255), casing_mm=0.3, dash=(1.8, 0.9))
                 else: ov.line(r, dcol(d), w, casing=(255, 255, 255), casing_mm=0.35)
             for m in D['mains']: ov.line(m, dcol(d), w, casing=(255, 255, 255), casing_mm=0.35)
             for m in D['mains'] or D['rad']: ov.arrows(m, dcol(d), arrows_every, size_mm=1.9)
+            if D['mains']:
+                for r, f in zip(D['rad'], D['rform']):
+                    if f == 'loop': ov.arrows(r, dcol(d), arrows_every, size_mm=1.9)      # у кольца направление важно
         if km_marks and focus:
             P = T.profile(focus); step = 1 if P['L'] <= 12 else (2 if P['L'] <= 30 else 5); k = step
             while k < P['L'] - 0.25:
@@ -501,26 +532,30 @@ class Builder:
     # --------------------------------------------------------------------------- рабочая карта
     def work_field(self):
         sc = int(self.o.get('work_scale') or 100000)
-        return sc, 15.3, 18.4
+        return (sc if sc in WORK_SCALES else 100000), *WORK_FIELD
 
     def chunks(self):
-        """Нарезка нитки на листы: жадно по ходу маршрута, с полем 0,8 см."""
-        if hasattr(self, '_chunks'): return self._chunks
-        T = self.T; sc, FW, FH = self.work_field(); f = sc / 100000.0
-        SEQ = [(d, p) for d in T.DAYS for s in T.day_lines(d) for p in s]
-        out = []; i = 0
-        while i < len(SEQ):
-            j = i; a0 = a1 = SEQ[i][1][0]; b0 = b1 = SEQ[i][1][1]
-            while j + 1 < len(SEQ):
-                la, lo = SEQ[j + 1][1]
-                na0, na1, nb0, nb1 = min(a0, la), max(a1, la), min(b0, lo), max(b1, lo)
-                if (nb1 - nb0) * self.KX > (FW - 1.6) * f or (na1 - na0) * self.KY > (FH - 1.6) * f: break
-                a0, a1, b0, b1 = na0, na1, nb0, nb1; j += 1
-            out.append(((a0 + a1) / 2, (b0 + b1) / 2, sorted({SEQ[k][0] for k in range(i, j + 1)})))
-            if j + 1 >= len(SEQ): break
-            i = j + 1
-        self._chunks = out
-        return out
+        if not hasattr(self, '_chunks'): self._chunks = work_chunks(self.T, self.work_field()[0], self.KX, self.KY)
+        return self._chunks
+
+    def scheme_mode(self):
+        """Где показать схему листов рабочей карты: sheet — отдельным листом, overview — на обзорной, none — нигде.
+        По умолчанию: больше четырёх листов — отдельно (на обзорной рамки забивают маршрут), иначе на обзорной."""
+        if not self.o.get('work', True) or len(self.chunks()) < 2: return 'none'
+        m = self.o.get('scheme') or 'auto'
+        if m == 'auto': return 'sheet' if len(self.chunks()) > 4 else 'overview'
+        return m if m in ('sheet', 'overview', 'none') else 'overview'
+
+    def draw_frames(self, ov, big=False):
+        """Рамки рабочих листов: тонкая сплошная линия, номер — квадрат в верхнем левом углу листа."""
+        col = (19, 60, 106) if big else (69, 155, 214); s = ov.s
+        for k, (sv, _) in enumerate(self.sheet_views(), 1):
+            a0, a1, b0, b1 = sv.bounds()
+            ov.line([(a1, b0), (a1, b1), (a0, b1), (a0, b0), (a1, b0)], col, 0.4 if big else 0.25)
+            x, y = ov.P(a1, b0); side = mm(6.4 if big else 3.4, s); t = str(k)
+            ov.d.rectangle((x, y, x + side, y + side), fill=col, outline=(255, 255, 255), width=max(1, int(mm(0.25, s))))
+            ov._ctext(x + side / 2, y + side / 2, t, font((10.5 if big else 5.8) if len(t) < 2 else (9 if big else 5.0), True, cond=True, scale=s), (255, 255, 255))
+            ov.occupy(x / s, y / s, (x + side) / s, (y + side) / s)
 
     def sheet_views(self):
         sc, FW, FH = self.work_field()
@@ -574,12 +609,8 @@ class Builder:
         base, st = self.basemap(v, sc)
         ov = Overlay(v)
         wsc = self.work_field()[0]
-        scheme = self.o.get('work', True) and sc > wsc and len(self.chunks()) > 1
-        if scheme:
-            for k, (sv, _) in enumerate(self.sheet_views(), 1):
-                a0, a1, b0, b1 = sv.bounds()
-                ov.line([(a1, b0), (a1, b1), (a0, b1), (a0, b0), (a1, b0)], (0, 60, 160), 0.4, dash=(2.2, 1.2))
-                ov.label(a1, b0, f'лист {k}', 6.6, color=(0, 60, 160), bold=True, leader=False, gap_mm=0.6, prefer=['SE', 'NE', 'E'], force=True)
+        scheme = self.scheme_mode() == 'overview' and sc > wsc
+        if scheme: self.draw_frames(ov)
         numbers = len([o for o in T.OBJ if o['on_map']]) > 6
         self.draw_route(ov, w=0.8, arrows_every=14, pt=6.2, numbers=numbers, camp_dates=not numbers, day_labels=True, pois='towns')
         hp = self.headline()
@@ -588,7 +619,7 @@ class Builder:
         sh = Sheet(v, base, ov.render(), ' · '.join(x for x in ['Обзорная карта маршрута', self.area] if x), sub, PW, FH + 16, top_cm=1.5, lat_step=gs[0] and gs[0] / 60, lon_step=gs[1] and gs[1] / 60)
         y = self.foot(sh, sc, st['src'])
         x = sh.frame_box[0]; d = sh.d
-        extra = [(lambda d, x, y: d.rectangle((x - mm(3.5), y - mm(1.3), x + mm(3.5), y + mm(1.3)), outline=(0, 60, 160), width=int(mm(0.35))), f'лист рабочей карты {scale_txt(wsc)}')] if scheme else []
+        extra = [(g_frame((69, 155, 214)), f'лист рабочей карты {scale_txt(wsc)}, номер — в углу')] if scheme else []
         cols = 4 if land else 3
         yy = self.put_legend(sh, x, y + mm(2), self.legend_items(extra, numbers=numbers, view=v), cols, pt=6.0) + mm(3.5)
         if numbers:      # список перевалов и вершин по номерам
@@ -612,6 +643,47 @@ class Builder:
                     d.text((x, yy), line, font=f2, fill=prof.CAMP_INK, anchor='la'); yy += mm(3.1); line = wd
                 else: line = (line + ' ' + wd).strip()
         return self._done(sh, 'overview', note=f'масштаб {scale_txt(sc)}')
+
+    # --------------------------------------------------------------------------- схема рабочей карты
+    def scheme(self):
+        """Отдельный лист: нитка, рамки и номера листов рабочей карты, как в атласе — без ночёвок и перевалов."""
+        T = self.T; views = self.sheet_views(); wsc = self.work_field()[0]
+        bb = [sv.bounds() for sv, _ in views]
+        la0, la1 = min(b[0] for b in bb), max(b[1] for b in bb); lo0, lo1 = min(b[2] for b in bb), max(b[3] for b in bb)
+        sc, land, FW, FH, PW, center = self.fit_box(la0, la1, lo0, lo1, self.adj('scheme'))
+        v = View(center, sc, FW, FH)
+        base, st = self.basemap(v, sc)
+        base = Image.blend(base, Image.new('RGB', base.size, (255, 255, 255)), 0.3)
+        ov = Overlay(v)
+        for d in T.DAYS:
+            for s in T.day_lines(d): ov.line(s, DAY_COLORS[0], 0.55, casing=(255, 255, 255), casing_mm=0.2)
+        self.draw_frames(ov, big=True)
+        first = next(iter(T.DAYS.values()))['main'] or T.day_pts(min(T.DAYS)); last = T.day_pts(max(T.DAYS))
+        ov.sym('start', *first[0], 3.0); ov.sym('finish', *last[-1], 3.0)
+        n = len(views)
+        sub = f'{n} {plural(n, "лист", "листа", "листов")} {scale_txt(wsc)} по ходу маршрута · {T.period()}'
+        gs = {100000: (2, 3), 200000: (3, 5), 300000: (5, 10), 500000: (10, 15)}.get(sc, (None, None))
+        sh = Sheet(v, base, ov.render(), ' · '.join(x for x in ['Схема рабочей карты', self.area] if x), sub, PW, FH + 12, top_cm=1.5,
+                   lat_step=gs[0] and gs[0] / 60, lon_step=gs[1] and gs[1] / 60)
+        y = self.foot(sh, sc, st['src'])
+        items = [(g_track(DAY_COLORS[0], arrow=False, w=0.55), 'нитка маршрута'), (g_frame((19, 60, 106)), f'лист рабочей карты {scale_txt(wsc)}, номер — в углу'),
+                 (g_sym('start', size=2.6), 'старт'), (g_sym('finish', size=2.6), 'финиш')]
+        self.put_legend(sh, sh.frame_box[0], y + mm(2), items, 4 if land else 2, pt=6.0)
+        return self._done(sh, 'scheme', note=f'масштаб {scale_txt(sc)}')
+
+    def fit_box(self, la0, la1, lo0, lo1, a):
+        """Масштаб и формат листа, чтобы поместить прямоугольник (как у обзорной): альбомный или книжный."""
+        w = (lo1 - lo0) * self.KX; h = (la1 - la0) * self.KY; best = None
+        for land, FW, FHmax, PW in ((True, 25.0, 13.5, 26.6), (False, 16.9, 20.5, 18.0)):
+            for sc in (50000, 100000, 200000, 300000, 500000, 1000000, 2000000, 5000000):
+                fw, fh = w * 1e5 / sc + 1.4, h * 1e5 / sc + 1.4
+                if fw <= FW and fh <= FHmax:
+                    cand = (sc, 0 if land else 1, land, FW, max(fh, 9.0 if land else 11.0), PW)
+                    if best is None or cand[:2] < best[:2]: best = cand
+                    break
+        if best is None: best = (5000000, 0, True, 25.0, 13.0, 26.6)
+        sc, _, land, FW, FH, PW = best
+        return a.get('scale') or sc, land, FW, round(FH, 1), PW, a.get('center') or ((la0 + la1) / 2, (lo0 + lo1) / 2)
 
     # --------------------------------------------------------------------------- район
     def region(self):
@@ -692,13 +764,13 @@ class Builder:
         x = sh.frame_box[0]
         segs, marks, camps = self.prof_inputs([d])
         box = (x, int(y + mm(3.0)), sh.frame_box[2] - x, int(mm(58)))
-        rad_here = bool(T.DAYS[d]['rad'] and T.DAYS[d]['mains']) and T.one_way
+        rad_here = bool(T.DAYS[d]['mains'] and any(f != 'loop' and o for f, o in zip(T.DAYS[d]['rform'], T.DAYS[d]['ronce'])))
         xl = 'км от начала дня' + (f', длина по карте{self.kx}' if self.kx else '') + ' (номера в кружках на карте)' + ('; радиальный выход — в одну сторону' if rad_here else '')
         sh.img, info = prof.draw(sh.img, box, segs, marks, camps, grade_col=GRADE_COL, orient='h',
                                  title=f'Профиль высот · день {d} · высоты {P["zmin"]:.0f}–{P["zmax"]:.0f} м', day_strip=False, x_label=xl, pt=6.0, bands=list(self._pbands), vex_max=VEX_MAX)
         sh.d = ImageDraw.Draw(sh.img)
         yl = box[1] + box[3] + mm(1.0)
         extra = [(g_sym('km', '3', size=2.7, color=dcol(d)), 'километры от начала дня' + (f' ({self.kx.strip()})' if self.kx else ''))]
-        if len(T.DAYS) > 1: extra.append((g_dash((120, 120, 120), 0.45), 'нитка соседних дней'))
+        if len(T.DAYS) > 1: extra.append((g_track((140, 146, 154), arrow=False, w=0.4), 'нитка соседних дней'))
         self.put_legend(sh, x, yl, self.legend_items(extra, photos=photos and any(p['day'] == d for p in T.PHOTOS), view=v, focus=d), 3, pt=5.6)
         return self._done(sh, f'day-{d}', note=f'масштаб {scale_txt(sc)}')

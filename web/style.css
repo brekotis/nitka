@@ -219,6 +219,11 @@ details.help code { font: 600 13px ui-monospace, 'JetBrains Mono', monospace; ba
 .day .pc .ctl { grid-column: 1 / -1; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .day .pc select, .day .pc input { min-height: 32px; padding: 3px 8px; width: auto; font-size: 13.5px; border-width: 1.5px; }
 .day .pc input[type=number] { width: 62px; }
+/* радиалка: форма и вопрос про обратный путь */
+.day .pc .rad { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+.day .pc .rad > .hint { font-size: 12.5px; }
+.day .pc .rad .rq { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; background: var(--sky-xl); border: 1.5px solid var(--sky-l); border-radius: 10px; padding: 7px 10px; font-size: 13.5px; }
+.seg.sm button { padding: 4px 11px; font-size: 13.5px; }
 .day.loose { border-color: var(--orange); } .day.loose > header { background: var(--orange); }
 .day.skip > header { background: #B6C0CC; color: var(--ink); }
 

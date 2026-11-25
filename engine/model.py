@@ -24,17 +24,118 @@ def hexcol(s, default=(70, 70, 70)):
         s = s.lstrip('#'); return tuple(int(s[i:i + 2], 16) for i in (0, 2, 4))
     except Exception: return default
 
-def there_back(r):
-    """Радиальный выход: (путь туда, путь обратно). Кольцо — обратного пути нет; нарисованный в одну сторону —
-    обратно тем же путём (если конец трека уже вернулся на свою же нитку — от этой точки)."""
-    if dist(r[0], r[-1]) < 150: return list(r), []
+def _seg_dist(p, a, b):
+    """Расстояние от точки до отрезка, м (локальная плоская проекция)."""
+    k = math.cos(math.radians(p[0])); mx, my = 111320 * k, 110540
+    ax, ay = (a[1] - p[1]) * mx, (a[0] - p[0]) * my; bx, by = (b[1] - p[1]) * mx, (b[0] - p[0]) * my
+    dx, dy = bx - ax, by - ay; L2 = dx * dx + dy * dy
+    t = 0.0 if L2 == 0 else max(0.0, min(1.0, -(ax * dx + ay * dy) / L2))
+    return math.hypot(ax + t * dx, ay + t * dy)
+
+def _turn(r, lo=0, hi=None):
+    """Точка разворота: самая дальняя от начала (в пределах [lo, hi])."""
+    hi = len(r) - 1 if hi is None else hi
+    return max(range(lo, hi + 1), key=lambda i: dist(r[0], r[i]))
+
+def _shared_tail(r, c, near_m=70.0, skip_m=300.0, miss_m=150.0):
+    """Обратный путь по своим же следам: с какой точки конец радиалки идёт по её началу.
+    Возвращает (js, ip): js — первая точка общего «хвоста», ip — точка на пути туда, где хвост к нему подходит.
+    Точку сравниваем только с тем, что пройдено раньше неё больше чем на skip_m, иначе любая точка «рядом» с соседней."""
+    n = len(r)
+    k0 = math.cos(math.radians(r[0][0])); mx, my = 111320 * k0, 110540; cell = 120.0
+    grid = {}
+    for i in range(n - 1):
+        (ya, xa), (yb, xb) = r[i], r[i + 1]
+        for cx in range(int(min(xa, xb) * mx // cell), int(max(xa, xb) * mx // cell) + 1):
+            for cy in range(int(min(ya, yb) * my // cell), int(max(ya, yb) * my // cell) + 1):
+                grid.setdefault((cx, cy), []).append(i)
+    js, ip = n, None; miss = 0.0; j = n - 1
+    while j > 0:
+        lim = c[j] - skip_m; best = None; bi = None
+        cx, cy = int(r[j][1] * mx // cell), int(r[j][0] * my // cell)
+        for gx in (cx - 1, cx, cx + 1):
+            for gy in (cy - 1, cy, cy + 1):
+                for i in grid.get((gx, gy), ()):
+                    if c[i + 1] > lim: continue
+                    d = _seg_dist(r[j], r[i], r[i + 1])
+                    if best is None or d < best: best, bi = d, i
+        if best is not None and best < near_m:
+            js, ip = j, bi; miss = 0.0
+        else:
+            miss += c[j + 1] - c[j] if j + 1 < n else 0.0
+            if miss > miss_m or lim <= 0: break
+        j -= 1
+    return js, ip
+
+def _end_on_path(r):
+    """Нарисованная радиалка кончается на своём же пути туда (подход + кольцо): индекс этой точки на пути, иначе None."""
     acc = 0.0; far = len(r) - 1
     for i in range(len(r) - 1, 0, -1):
         acc += dist(r[i], r[i - 1])
         if acc > 300: far = i - 1; break
     i = min(range(far + 1), key=lambda t: dist(r[t], r[-1]))
-    back = r[i::-1] if dist(r[i], r[-1]) < 150 else r[::-1]
-    return list(r), list(back)
+    return i if i > 0 and dist(r[i], r[-1]) < 150 else None
+
+def radial_info(r, shape='auto'):
+    """Форма радиального выхода по геометрии и выбору туриста (shape: auto | back | loop | lolli).
+    drawn    — нарисован в одну сторону (конец далеко от начала): обратно тем же путём;
+    recorded — записан целиком туда и обратно: делится в точке разворота;
+    loop     — кольцо: обратного пути нет;
+    lolli    — подход туда-обратно по одной тропе и кольцо на конце: обратный путь — только подход.
+    Возвращает dict(form, split, auto): split — индекс, с которого начинается обратный путь (для recorded/lolli)."""
+    n = len(r)
+    if n < 3: return dict(form='drawn', split=None, auto='drawn')
+    c = [0.0]
+    for a, b in zip(r, r[1:]): c.append(c[-1] + dist(a, b))
+    L = c[-1]
+    closed = dist(r[0], r[-1]) < max(400.0, 0.05 * L)
+    auto = 'drawn'; split = {}
+    if closed:
+        js, ip = _shared_tail(r, c)
+        back = L - c[js] if js < n else 0.0
+        if back < max(200.0, 0.05 * L): auto = 'loop'
+        else:
+            ring = c[js] - c[ip]
+            k = _turn(r, ip, js) if ip is not None else _turn(r)
+            split['back'] = k
+            if ring < max(300.0, 0.1 * L): auto = 'recorded'
+            else: auto = 'lolli'; split['lolli'] = js
+        split.setdefault('back', _turn(r))
+    else:
+        i = _end_on_path(r)
+        if i is not None: auto = 'lolli'; split['lolli'] = i; split['drawn_lolli'] = True
+    want = shape if shape in ('back', 'loop', 'lolli') else None
+    if want == 'loop': form = 'loop'
+    elif want == 'back': form = 'recorded' if closed and 0 < split.get('back', 0) < n - 1 else 'drawn'
+    elif want == 'lolli': form = 'lolli' if 'lolli' in split else ('loop' if closed else 'drawn')
+    else: form = auto
+    sp = split.get('lolli') if form == 'lolli' else split.get('back') if form == 'recorded' else None
+    return dict(form=form, split=sp, auto=auto, drawn_lolli=form == 'lolli' and split.get('drawn_lolli', False))
+
+def radial_form(r, shape='auto'):
+    return radial_info(r, shape)['form']
+
+def there_back(r, shape='auto'):
+    """Радиальный выход: (путь туда, путь обратно, форма). Кольцо — обратного пути нет; записанный целиком и
+    «подход + кольцо» — делятся там, где начинается обратный путь по своим следам; нарисованный в одну сторону —
+    обратно тем же путём (если конец трека уже вернулся на свою же нитку — от этой точки)."""
+    info = radial_info(r, shape); form = info['form']
+    if form == 'loop': return list(r), [], form
+    if form == 'lolli' and info['drawn_lolli']:      # нарисовано: подход, кольцо и снова точка на подходе — обратно по подходу
+        k = info['split']; return list(r), list(r[k::-1]), form
+    if form in ('recorded', 'lolli'):
+        k = info['split']; return list(r[:k + 1]), list(r[k + 1:]), form
+    return list(r), list(r[::-1]), form
+
+def radial_summary(r):
+    """Для экрана «Дни»: что «Нитка» видит в радиалке и сколько км в каждой форме — (путь туда, обратный путь), км."""
+    def km(pts): return round(sum(dist(a, b) for a, b in zip(pts, pts[1:])) / 1000, 2)
+    info = radial_info(r); opts = {}
+    for sh in ('back', 'loop', 'lolli'):
+        out, back, form = there_back(r, sh)
+        if sh == 'lolli' and form != 'lolli': continue
+        opts[sh] = [km(out), km(back) if form != 'drawn' else km(back)]
+    return dict(auto=info['auto'], opts=opts)
 
 
 class Trip:
@@ -69,13 +170,18 @@ class Trip:
                 pts.append(t)
                 if len(q) > 2 and q[2] is not None: self._ele[t] = q[2]
             if len(pts) < 2: continue
-            D = days.setdefault(int(d), dict(mains=[], rad=[]))
-            (D['rad'] if p.get('role') == 'radial' else D['mains']).append(pts)
+            D = days.setdefault(int(d), dict(mains=[], rad=[], rshape=[]))
+            if p.get('role') == 'radial':
+                D['rad'].append(pts); D['rshape'].append(p.get('shape') or 'auto')
+                D.setdefault('ronce', []).append(self.one_way if p.get('once') is None else bool(p['once']))
+            else: D['mains'].append(pts)
         self.DAYS = dict(sorted(days.items()))
         if not self.DAYS: raise ValueError('В проекте нет треков — загрузите GPX или ссылку nakarte.')
         for d, D in self.DAYS.items():
-            if not D['mains'] and len(D['rad']) == 1 and dist(D['rad'][0][0], D['rad'][0][-1]) > 1500:
-                D['mains'] = D['rad']; D['rad'] = []          # «радиалка» без возврата и без основной нитки — обычный переход
+            if not D['mains'] and len(D['rad']) == 1 and D['rshape'][0] == 'auto' and dist(D['rad'][0][0], D['rad'][0][-1]) > 1500:
+                D['mains'] = D['rad']; D['rad'] = []; D['rshape'] = []; D['ronce'] = []          # «радиалка» без возврата и без основной нитки — обычный переход
+            D.setdefault('ronce', [])
+            D['rform'] = [radial_form(r, s) for r, s in zip(D['rad'], D['rshape'])]
             D['main'] = [p for m in D['mains'] for p in m]
         self.REST = set(range(1, max(self.DAYS) + 1)) - set(self.DAYS)
         self._path = {d: self._day_path(d) for d in self.DAYS}
@@ -203,11 +309,10 @@ class Trip:
         for k, m in enumerate(D['mains']):
             for i, p in enumerate(m):
                 path.append((p, 2 if (i == 0 and k > 0 and dist(D['mains'][k - 1][-1], p) > GAP) else 0))
-        back_flag = 1 if self.one_way else 0
         ins = []
-        for r in D['rad']:
-            out, back = there_back(r)
-            rr = [(p, 0) for p in out] + [(p, back_flag) for p in back]
+        for r, shape, once in zip(D['rad'], D['rshape'], D['ronce']):
+            out, back, form = there_back(r, shape)
+            rr = [(p, 0) for p in out] + [(p, 1 if once else 0) for p in back]
             if not D['mains']:
                 if path and dist(path[-1][0], rr[0][0]) > GAP: rr[0] = (rr[0][0], 2)
                 path += rr; continue

@@ -608,11 +608,19 @@ class Sheet:
 
 
 # legend glyphs (рисуются прямо на листе, 1x)
-def g_track(color, casing=True):
+def g_track(color, casing=True, arrow=True, w=0.8):
     def f(d, x, y):
-        if casing: d.line((x - mm(3.5), y, x + mm(3.5), y), fill=(255, 255, 255), width=int(mm(1.5)))
-        d.line((x - mm(3.5), y, x + mm(3.5), y), fill=color, width=int(mm(0.8)))
-        s = mm(1.0); d.polygon([(x + s, y), (x - s * 0.8, y - s * 0.75), (x - s * 0.35, y), (x - s * 0.8, y + s * 0.75)], fill=color, outline=(255, 255, 255))
+        if casing: d.line((x - mm(3.5), y, x + mm(3.5), y), fill=(255, 255, 255), width=int(mm(w + 0.7)))
+        d.line((x - mm(3.5), y, x + mm(3.5), y), fill=color, width=max(1, int(mm(w))))
+        if arrow:
+            s = mm(1.0); d.polygon([(x + s, y), (x - s * 0.8, y - s * 0.75), (x - s * 0.35, y), (x - s * 0.8, y + s * 0.75)], fill=color, outline=(255, 255, 255))
+    return f
+
+def g_frame(color):
+    """Рамка листа рабочей карты с номером в углу."""
+    def f(d, x, y):
+        d.rectangle((x - mm(3.5), y - mm(1.5), x + mm(3.5), y + mm(1.5)), outline=color, width=max(1, int(mm(0.3))))
+        d.rectangle((x - mm(3.5), y - mm(1.5), x - mm(1.9), y + mm(0.1)), fill=color)
     return f
 
 def g_dash(color, w=0.6):
