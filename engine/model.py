@@ -3,7 +3,7 @@
 Trip(project) — всё, что раньше было зашито в kdata.py конкретного похода.
 Километраж: длина нитки по карте × kcoef. Радиальные выходы — в одну сторону (если radial_one_way).
 """
-import math
+import math, re
 from datetime import date, timedelta
 from . import dem
 from .classify import TYPE, OBJ_TYPES, GRADES, GRADE_COL, BAND, dist, piece_times, time_info, trip_tz, hm, dur
@@ -111,6 +111,10 @@ def radial_info(r, shape='auto'):
     else: form = auto
     sp = split.get('lolli') if form == 'lolli' else split.get('back') if form == 'recorded' else None
     return dict(form=form, split=sp, auto=auto, drawn_lolli=form == 'lolli' and split.get('drawn_lolli', False))
+
+def _hm_ok(s):
+    """Время точки «9:45» (из хронометража или остановки) — или None."""
+    return s if isinstance(s, str) and re.fullmatch(r'\d{1,2}:\d{2}', s) else None
 
 class SegIndex:
     """Ближайший отрезок среди линий: сетка ~200 м, чтобы не перебирать всю нитку для каждой точки."""
@@ -266,10 +270,10 @@ class Trip:
             grade = p.get('grade') if p.get('grade') in GRADE_COL else None
             if p['type'] in OBJ_TYPES:
                 kind = p['type'] if p['type'] in ('pass', 'peak') else 'obst'
-                self.OBJ.append(dict(kind=kind, type=p['type'], title=name, grade=grade, h=int(p['h']) if p.get('h') else None, pt=pt, key=bool(p.get('key')),
+                self.OBJ.append(dict(kind=kind, type=p['type'], title=name, grade=grade, h=int(p['h']) if p.get('h') else None, pt=pt, key=bool(p.get('key')), time=_hm_ok(p.get('time')),
                                      on_map=p.get('on_map', True), on_profile=p.get('on_profile', True), lp=_lp(p)))
             else:
-                self.POI.append(dict(type=p['type'], sym=t['sym'], text=t.get('text'), color=t.get('color') or (70, 70, 70), title=name, legend=t['title'], pt=pt,
+                self.POI.append(dict(type=p['type'], sym=t['sym'], text=t.get('text'), color=t.get('color') or (70, 70, 70), title=name, legend=t['title'], pt=pt, time=_hm_ok(p.get('time')),
                                      on_map=p.get('on_map', True), on_profile=bool(p.get('on_profile')), h=int(p['h']) if p.get('h') else None, lp=_lp(p)))
 
         # порядковые номера объектов — по ходу маршрута

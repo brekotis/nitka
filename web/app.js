@@ -659,7 +659,8 @@ function stepDays() {
     ${M.days.map(d => { const dt = dateOf(d.n);
       if (!d.pieces.length) return `<div class="day rest"><header>День ${d.n}${dt ? ' · ' + dm(dt) : ''} <small>днёвка — трека нет</small></header></div>`;
       const tt = dayTime(d.pieces);
-      return `<div class="day${d.n % 2 ? '' : ' even'}"><header>День ${d.n}${dt ? ` · ${dm(dt)}, ${wd(dt)}` : ''} <small class="num">≈ ${km(dayKm(d.pieces))} км</small>${tt ? `<span class="dtime num" title="Выход — приход по местному времени; ЧХВ — чистое ходовое время без остановок">${tt.start}–${tt.end} · ЧХВ ${hmDur(tt.move)}${tt.stops ? ` · ${tt.stops} ${plural(tt.stops, 'привал', 'привала', 'привалов')}` : ''}</span>` : ''}</header>${d.pieces.map(p => pieceRow(p, M.max)).join('')}</div>`; }).join('')}
+      const canRad = d.pieces.some(p => p.role === 'main');
+      return `<div class="day${d.n % 2 ? '' : ' even'}"><header>День ${d.n}${dt ? ` · ${dm(dt)}, ${wd(dt)}` : ''} <small class="num">≈ ${km(dayKm(d.pieces))} км</small>${tt ? `<span class="dtime num" title="Выход — приход по местному времени; ЧХВ — чистое ходовое время без остановок">${tt.start}–${tt.end} · ЧХВ ${hmDur(tt.move)}${tt.stops ? ` · ${tt.stops} ${plural(tt.stops, 'привал', 'привала', 'привалов')}` : ''}</span>` : ''}</header>${d.pieces.map(p => pieceRow(p, M.max)).join('')}${canRad ? `<div class="pc dayrow"><button class="btn sm ghost" data-a="dayrad" data-d="${d.n}" title="Склеить куски дня в один радиальный выход — от ночёвки и обратно">⇄ Весь день — радиалка</button></div>` : ''}</div>`; }).join('')}
     ${varsBlock()}
     ${M.skipped.length ? `<details class="day skip"><summary style="list-style:none;cursor:pointer"><header>Не используются <small>${M.skipped.length} · нажми, чтобы показать</small></header></summary>${M.skipped.map(p => pieceRow(p, M.max)).join('')}</details>` : ''}
     <div class="next"><button class="btn" data-a="step" data-step="tracks">← Треки</button><button class="btn go" data-a="step" data-step="points">Дальше: точки →</button></div>`;
@@ -701,6 +702,22 @@ function pointEditor(q) {
       ${q.type !== 'photo' ? `<label class="switch"><input type="checkbox" data-c="pflag" data-f="on_profile" data-id="${q.id}" ${q.on_profile ? 'checked' : ''}>на профиле высот</label>` : ''}</div>
     <div class="raw">${q.raw ? `В треке: «${esc(q.raw)}»${q.folder ? ` · ${esc(q.folder)}` : ''}. ` : ''}Точку можно перетащить на карте. Правки сохраняются сами.</div></div>`;
 }
+// ---------------------------------------------------------------- хронометраж → точки
+const WHERE = { stop: m => `на остановке, ${m} мин`, move: () => 'на ходу', none: () => 'в это время трека нет' };
+function chronoBlock() {
+  if (!P().pieces.some(p => p.tinfo)) return '';
+  const c = S.chrono;
+  const list = c ? `<div class="chr-list">${c.items.map((it, i) => `<label class="chr${it.where === 'none' ? ' off' : ''}">
+      <input type="checkbox" data-c="chrsel" data-i="${i}" ${c.sel[i] ? 'checked' : ''} ${it.where === 'none' ? 'disabled' : ''}>
+      <span class="tm num">${esc(it.time)}</span>
+      <span><b>${esc(it.text || 'отметка')}</b> <span class="hint">→</span> <select data-c="chrtype" data-i="${i}" aria-label="Тип точки">${allTypes().filter(t => t.id !== 'skip' && t.id !== 'photo').map(t => `<option value="${t.id}"${t.id === it.type ? ' selected' : ''}>${esc(t.title)}</option>`).join('')}</select>
+        <span class="pill${it.where === 'none' ? ' w' : ''}">${WHERE[it.where](it.mins)}</span>${it.day ? `<span class="hint"> · день ${it.day}</span>` : ''}</span></label>`).join('')}</div>
+      <div class="chips"><button class="btn sm go" data-a="chronoadd">Добавить ${plural(c.sel.filter(Boolean).length, 'точку', 'точки', 'точек').replace(/^/, c.sel.filter(Boolean).length + ' ')}</button><button class="btn sm" data-a="chronoclear">Отмена</button></div>` : '';
+  return `<details class="help chrono"${S.chronoOpen || c ? ' open' : ''}><summary>Хронометраж → точки на карте</summary><div class="in">
+    <div class="hint">Вставь хронометраж как есть: строки «9:45 Суаканская теснина», между днями — дата «24.07» или «День 3». Каждая запись встанет на трек по времени, а если рядом остановка — прямо на неё. Тип угадаю по словам, проверишь перед добавлением.</div>
+    <textarea id="chrtext" rows="6" placeholder="24.07&#10;9:23 водопад Геби&#10;10:00 спуск, надеваем кошки&#10;12:13 привал, магазин">${esc(S.chronoText || '')}</textarea>
+    <div class="chips"><button class="btn sm${c ? '' : ' go'}" data-a="chrono">Разобрать</button></div>${list}</div></details>`;
+}
 function stepPoints() {
   const pr = P(); const pts = pr.points; const counts = {}; pts.forEach(q => counts[q.type] = (counts[q.type] || 0) + 1);
   const guess = pts.filter(q => q.guess && q.type !== 'skip').length;
@@ -713,7 +730,7 @@ function stepPoints() {
     ${S.selPoint || S.selBand ? '' : todoBlock(td.filter(t => t.step === 'points'), 'Стоит сделать')}`;
   if (S.ptab === 'bands') return head + stepBands();
   if (S.ptab === 'obst' && showObst()) return head + stepObst();
-  return `${head}<p>Ночёвки, перевалы, вода, достопримечательности — всё, что будет на картах. Нажми на точку, чтобы поправить.</p>
+  return `${head}<p>Ночёвки, перевалы, вода, достопримечательности — всё, что будет на картах. Нажми на точку, чтобы поправить.</p>${chronoBlock()}
     <div class="chips"><button class="btn sm go" data-a="padd">＋ Точка на карте</button><input type="text" data-c="q" value="${esc(S.q)}" placeholder="поиск" style="flex:1;min-width:120px;min-height:32px;padding:3px 10px"></div>
     ${daysModel().max > 1 && pts.some(q => q.type === 'camp') ? `<div class="chips"><button class="btn sm" data-a="sugg" data-w="camps">Ночёвки по концам дней…</button></div>` : ''}
     <div class="chips"><button class="chip${S.filter === 'all' ? ' on' : ''}" data-a="filter" data-f="all">Все <span class="cnt">${pts.length - (counts.skip || 0)}</span></button>
@@ -946,13 +963,14 @@ function stepMaps() {
       <div class="field"><span>Основа</span><div class="chips">${[['otm', 'OpenTopoMap'], ['gsh', 'Генштаб и ГГЦ, где есть']].map(([v, t]) => `<button class="chip${(sh.base || 'otm') === v ? ' on' : ''}" data-a="sbase" data-v="${v}">${t}</button>`).join('')}</div>
         <div class="hint">OpenTopoMap есть везде. Генштаб подробнее в горах, но покрывает не всё — где его нет, подставится OpenTopoMap.</div></div>
       ${pr.points.some(q => q.type === 'photo') ? `<label class="switch"><input type="checkbox" data-c="sheet" data-f="photos" ${sh.photos !== false ? 'checked' : ''}>Фототочки на картах дней и рабочих листах</label>` : ''}
+      ${pr.pieces.some(p => p.tinfo) || pr.points.some(q => q.time) ? `<label class="switch"><input type="checkbox" data-c="sheet" data-f="times" ${sh.times !== false ? 'checked' : ''}><span><b>Время на картах</b><div class="hint">у точек из хронометража и остановок — «10:50 привал на леднике»; у подписи дня — выход и приход</div></span></label>` : ''}
       <label class="switch logo-opt"><input type="checkbox" data-c="sheet" data-f="logo" ${sh.logo !== false ? 'checked' : ''}><img src="/static/img/logo-s.png" alt=""><span><b>Логотип «Восхождения»</b><div class="hint">в правом нижнем углу каждого листа</div></span></label>
       <div class="next" style="position:static"><button class="btn" data-a="step" data-step="points">← Точки</button></div>
     </section>
     <section class="out">
       <h2 class="out-title">${running ? 'Собираю…' : (ok.length ? 'Готовые листы' : 'Сборка')}</h2>
       <div class="out-acts">${ok.length && !running ? `<a class="btn go big" href="/api/projects/${S.pid}/zip?fmt=png" download>${I.dl}Скачать всё архивом</a>
-          <a class="btn sm" href="/api/projects/${S.pid}/zip?fmt=jpg" download title="То же, но в JPG — файлы легче">Архив в JPG</a><a class="btn sm" href="/files/${S.pid}/karty.pdf?dl=1" title="Все листы одним PDF">PDF</a><span class="sp"></span>
+          <a class="btn sm" href="/api/projects/${S.pid}/zip?fmt=jpg" download title="То же, но в JPG — файлы легче">Архив в JPG</a><a class="btn sm" href="/files/${S.pid}/karty.pdf?dl=1" title="Все листы одним PDF">PDF</a>${b.docx ? `<a class="btn sm" href="/files/${S.pid}/grafik_dvizheniya.docx?dl=1" title="Таблица по дням для отчёта или заявки — Word">График движения</a>` : ''}<span class="sp"></span>
           <button class="btn" data-a="build" ${!hasTrack ? 'disabled' : ''}>Пересобрать</button>`
         : `<button class="btn go big" data-a="build" ${running || !hasTrack ? 'disabled' : ''}>${running ? 'Собираю…' : 'Собрать карты'}</button>`}
         <button class="btn sm only-m" data-a="tosettings">Настройки листов ↓</button></div>
@@ -970,7 +988,7 @@ function stepMaps() {
           <div class="dl"><a href="/files/${S.pid}/${s.file}?dl=1" data-stop>PNG</a><a href="/files/${S.pid}/${s.file.replace('.png', '.jpg')}?dl=1" data-stop>JPG</a>${s.frame ? `<a href="#" data-stop data-a="frame" data-i="${i}" title="Сдвинуть рамку или поменять масштаб этого листа">Рамка</a>` : ''}</div></div></div>`
         : `<div class="sheet ${s.state === 'run' ? 'run' : ''}"><div class="pic"><div class="wait">${s.state === 'run' ? 'рисую' : s.state === 'err' ? 'ошибка' : 'ждёт'}</div></div><div class="cap"><b>${esc(s.title)}</b><div class="s">${s.state === 'err' ? esc(s.error || '') : '&nbsp;'}</div></div></div>`).join('')}</div>
       ${(() => { hasT = !!(sm && sm.days && sm.days.some(d => d.t_start)); return ''; })()}
-      ${sm && sm.days ? `<div class="sec"><h3>${isPlan() ? 'График движения (план)' : 'Сводка по дням'} <span class="hint" style="text-transform:none;letter-spacing:0;font:400 13.5px var(--body)">— ${isPlan() ? 'для заявки' : 'для графика движения'}</span></h3>
+      ${sm && sm.days ? `<div class="sec"><h3>${isPlan() ? 'График движения (план)' : 'Сводка по дням'} <span class="hint" style="text-transform:none;letter-spacing:0;font:400 13.5px var(--body)">— ${isPlan() ? 'для заявки' : 'для графика движения'}</span></h3>${b.docx ? `<a class="btn sm" href="/files/${S.pid}/grafik_dvizheniya.docx?dl=1" style="justify-self:start">Скачать в Word (docx)</a>` : ''}
         <div class="tblwrap"><table class="sum"><thead><tr><th>День</th><th>Дата</th><th class="n">Км</th><th class="n">Набор</th><th class="n">Сброс</th><th class="n">Высоты, м</th>${hasT ? '<th class="n">Выход</th><th class="n">Приход</th><th class="n">ЧХВ</th><th class="n">Привалы</th>' : ''}<th class="obj">${sm.days.some(d => (d.key_objects || []).length) ? 'Определяющие препятствия' : 'Препятствия'}</th></tr></thead><tbody>
         ${sm.days.map(d => `<tr><td>${d.n}</td><td>${d.date}</td><td class="n">${km(d.km)}</td><td class="n">+${d.up}</td><td class="n">−${d.dn}</td><td class="n">${d.zmin}–${d.zmax}</td>${hasT ? `<td class="n">${d.t_start || ''}</td><td class="n">${d.t_end || ''}</td><td class="n">${d.move || ''}</td><td class="n">${d.n_stops ? `${d.n_stops} · ${d.pause}` : ''}</td>` : ''}<td>${esc(((d.key_objects || []).length ? d.key_objects : d.objects).join('; '))}</td></tr>`).join('')}
         <tr><td colspan="2"><b>Всего</b></td><td class="n"><b>${km(sm.km)}</b></td><td class="n"><b>+${sm.up}</b></td><td class="n"><b>−${sm.dn}</b></td><td></td>${hasT ? `<td></td><td></td><td class="n"><b>${sm.move || ''}</b></td><td></td>` : ''}<td class="hint">${sm.kcoef !== 1 ? `км с коэффициентом ${km(sm.kcoef)}; ` : ''}высоты — ${sm.elev === 'track' ? 'из трека' : 'по модели рельефа'}</td></tr></tbody></table></div>
@@ -1327,6 +1345,33 @@ A.stoppt = el => {
   P().points.push(q); map && map.closePopup(); S.selPoint = q.id; S.ptab = obj ? 'obst' : 'points'; S.filter = 'all'; S.q = '';
   dirty(); if (S.step !== 'points') go(`#/p/${S.pid}/points`); else { paintPanel(); drawMap(); scrollToPoint(); }
 };
+A.chrono = async () => {
+  const t = ($('#chrtext') || {}).value || ''; S.chronoText = t;
+  if (!t.trim()) return toast('Вставь строки хронометража', true);
+  await flush();
+  try {
+    const r = await api('POST', `/api/projects/${S.pid}/chrono`, { text: t }, false, 'Ставлю записи на трек…');
+    if (!r.ok) { S.chrono = null; paintPanel(); return toast(r.msg, true); }
+    S.chrono = { items: r.items, sel: r.items.map(it => it.where !== 'none') }; toast(r.msg); paintPanel();
+  } catch (e) { fail(e); }
+};
+A.chronoclear = () => { S.chrono = null; paintPanel(); };
+A.chronoadd = () => {
+  const c = S.chrono; if (!c) return; let n = 0;
+  c.items.forEach((it, i) => {
+    if (!c.sel[i] || it.where === 'none') return;
+    const obj = S.obj.includes(it.type);
+    P().points.push({ id: Math.random().toString(16).slice(2, 10), type: it.type, name: it.name || it.text || '', lat: it.lat, lon: it.lon, time: it.time, grade: it.grade || null, h: it.h || null,
+      on_map: true, on_profile: obj, nights: 1, folder: 'хронометраж', raw: `${it.time} ${it.text}`, note: it.where === 'stop' ? `остановка ${it.mins} мин` : '' });
+    n++;
+  });
+  S.chrono = null; S.chronoText = ''; dirty(); paintPanel(); drawMap(); toast(`Добавлено точек: ${n}. Время у них будет подписано на картах дней.`);
+};
+A.dayrad = async el => {
+  await flush();
+  try { const r = await api('POST', `/api/projects/${S.pid}/day-radial`, { day: +el.dataset.d }, false, 'Склеиваю день в радиальный выход…'); S.proj = r.project; toast(r.msg, !r.ok); if (r.new) S.selPiece = r.new; paintPanel(); drawMap(); }
+  catch (e) { fail(e); }
+};
 A.importas = el => { S.importAs = el.dataset.v; paintPanel(); };
 A.mkvars = el => { const ids = daysModel().loose.map(p => p.id); return varOp({ action: 'make', pieces: ids, kind: el.dataset.k }, 'Делаю варианты…'); };
 A.vkind = el => { const v = (P().variants || []).find(x => x.id === el.dataset.id); if (!v) return; v.kind = el.dataset.v; P().pieces.forEach(p => { if (p.var === v.id) p.role = v.kind; }); dirty(); paintPanel(); drawPieces(); };
@@ -1343,6 +1388,8 @@ A.pmode = el => { P().meta.mode = el.dataset.v; dirty(); paintPanel(); };
 A.pshape = el => { const p = pieceById(el.dataset.id), v = el.dataset.v; if (v === radAuto(p)) delete p.shape; else p.shape = v; dirty(); paintPanel(); drawPieces(); };
 A.ponce = el => { const p = pieceById(el.dataset.id), v = el.dataset.v === '1'; if (v === (P().meta.radial_one_way !== false)) delete p.once; else p.once = v; dirty(); paintPanel(); };
 const C = {
+  chrsel(el) { S.chrono.sel[+el.dataset.i] = el.checked; paintPanel(); },
+  chrtype(el) { S.chrono.items[+el.dataset.i].type = el.value; },
   tz(el) { P().meta.tz = +el.value; dirty(); toast('Пояс сменится во времени после сохранения — обнови страницу через пару секунд'); },
   vtitle(el) { const v = (P().variants || []).find(x => x.id === el.dataset.id); if (v) { v.title = el.value; dirty(); } },
   vnote(el) { const v = (P().variants || []).find(x => x.id === el.dataset.id); if (v) { v.note = el.value; dirty(); } },

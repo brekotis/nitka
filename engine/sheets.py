@@ -7,7 +7,8 @@ from PIL import Image, ImageDraw, ImageChops
 from . import mapkit as mk, profile as prof
 from .mapkit import font, mm, INK, View, Overlay, Sheet, g_track, g_dash, g_sym, g_band, g_frame, g_exit, DAY_COLORS, ALT_COL, EXIT_RED, EXIT_INK
 from .model import GRADE_COL
-from .classify import GRADES, dist
+from .classify import GRADES, dist, hm
+TIME_INK = (106, 22, 150)      # время из хронометража на картах
 
 VEX_MAX = 60            # предел вертикального растяжения профиля: равнина должна выглядеть равниной
 DAYC = [(226, 0, 26), (122, 26, 170)]          # нечётные / чётные дни
@@ -433,7 +434,8 @@ class Builder:
                          gap_mm=1.3, force=True, leader=True, prefer=pref(o))
             elif mine:
                 sub = T.obj_sub(o)
-                ov.label(*o['pt'], o['title'] + ('\n' + sub if sub else ''), pt, bold=True, color=lab_col(o), force=True, prefer=pref(o))
+                tm = f"\n{o['time']}" if self.o.get('times', True) and o.get('time') else ''
+                ov.label(*o['pt'], o['title'] + ('\n' + sub if sub else '') + tm, pt, bold=True, color=lab_col(o), force=True, prefer=pref(o))
             else:
                 ov.label(*o['pt'], o['title'], pt - 0.6, color=lab_col(o), italic=True, prefer=pref(o))
         for c in camps:
@@ -447,6 +449,8 @@ class Builder:
         if pois == 'label':
             for o in pl:
                 col = o['color'] if o['sym'] in ('letter', 'water', 'plan', 'exit') else INK
+                if self.o.get('times', True) and o.get('time'):      # хронометраж: время и что было — фиолетовым
+                    ov.label(*o['pt'], f"{o['time']} {o['title']}".strip(), pt - 0.3, color=TIME_INK, bold=True, prefer=pref(o)); continue
                 ov.label(*o['pt'], o['title'], pt - 0.5, color=tuple(int(c * 0.8) for c in col), bold=o['type'] in ('town', 'exit'), prefer=pref(o))
         elif pois == 'towns':
             for o in pl:
@@ -462,7 +466,9 @@ class Builder:
                 def free(q): x, y = v.px(*q); return min([math.hypot(x - a, y - b_) for a, b_ in busy] or [1e9])
                 cand = [ins[len(ins) * k // 12] for k in (6, 5, 7, 4, 8, 3, 9)]
                 q = next((c for c in cand if free(c) > mm(7)), max(cand, key=free))
-                ov.label(*q, f'день {d}' + (f' · {T.date(d)}' if T.date(d) else ''), pt, color=dcol(d), bold=True, italic=True, leader=False, gap_mm=2.0)
+                dt = T.day_time(d) if self.o.get('times', True) else None
+                tt = f" · {hm(dt['start'], T.tz)}–{hm(dt['end'], T.tz)}" if dt else ''
+                ov.label(*q, f'день {d}' + (f' · {T.date(d)}' if T.date(d) else '') + tt, pt, color=dcol(d), bold=True, italic=True, leader=False, gap_mm=2.0)
         for c in clusters: ov.label(c['lat'], c['lon'], c['label'], pt - 0.6, color=mk.PHOTO, gap_mm=1.0, force=True)
 
     def g_grades(self, d, x, y):

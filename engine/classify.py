@@ -114,6 +114,28 @@ def add_variant(proj, kind, title):
     proj.setdefault('variants', []).append(v)
     return v
 
+def day_radial(proj, day):
+    """Весь день — радиальный выход: куски дня (по порядку) склеиваются в один, и форму — кольцо, туда-обратно,
+    подход + кольцо — «Нитка» видит уже по целому выходу. Куски должны стыковаться (разрыв до 400 м)."""
+    pcs = sorted([p for p in proj['pieces'] if p.get('day') == day and p.get('role') in ('main', 'radial') and len(p.get('pts', [])) > 1],
+                 key=lambda p: p.get('order', 0))
+    if not pcs: return dict(ok=False, msg='В этом дне нет нитки.')
+    for a, b in zip(pcs, pcs[1:]):
+        if dist(a['pts'][-1][:2], b['pts'][0][:2]) > 400:
+            return dict(ok=False, msg=f'Куски дня {day} не стыкуются (между «{a["name"]}» и «{b["name"]}» больше 400 м). Поправь порядок кусков или отметь радиалкой только нужный кусок.')
+    if len(pcs) == 1:
+        pcs[0]['role'] = 'radial'; return dict(ok=True, msg=f'День {day} — радиальный выход.')
+    pts = list(pcs[0]['pts']); tl = [piece_times(p) for p in pcs]; ts = list(tl[0]) if all(tl) else None
+    for p, t in zip(pcs[1:], tl[1:]):
+        k = 1 if dist(pts[-1][:2], p['pts'][0][:2]) < 1 else 0          # общая точка на стыке — один раз
+        pts += p['pts'][k:]
+        if ts is not None: ts += t[k:]
+    new = dict(id=uid(), src=pcs[0].get('src'), name=f'день {day} — радиальный выход', pts=pts, day=day, role='radial', order=pcs[0].get('order', 0), km=round(length_km(pts), 2))
+    set_times(new, ts)
+    ids = {p['id'] for p in pcs}
+    proj['pieces'] = [p for p in proj['pieces'] if p['id'] not in ids] + [new]
+    return dict(ok=True, new=new['id'], msg=f'День {day} — один радиальный выход из {len(pcs)} кусков. Форму «Нитка» определила по нему целиком; если нужно, его можно снова разрезать.')
+
 def group_variants(proj, pieces, kind, title=None):
     """Куски → варианты. Куски одного трека, которые стыкуются (конец одного у начала другого, до 300 м), — один вариант;
     несвязанные куски — разные варианты (у Паши «Запасные варианты» — шесть разных обходов одним треком)."""

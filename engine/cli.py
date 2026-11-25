@@ -54,6 +54,14 @@ def build(proj_path, out, only=None):
         summ = T.summary()
         _write(os.path.join(out, 'summary.json'), summ)
         B = Builder(T, out, proj.get('sheets') or {})
+        for d in summ['days']:
+            try: d['route'] = B.day_chain(d['n'])          # «Н6 → пер. Восьми (2А, 3513) → Н7» — для графика движения
+            except Exception: pass
+        _write(os.path.join(out, 'summary.json'), summ)
+        try:
+            from .docx_lite import schedule_docx
+            with open(os.path.join(out, 'grafik_dvizheniya.docx'), 'wb') as f: f.write(schedule_docx(summ, proj.get('meta', {}), proj.get('meta', {}).get('title') or 'Поход'))
+        except Exception: traceback.print_exc()
         plan = B.plan()
         old = {}
         if only:

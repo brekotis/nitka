@@ -11,7 +11,7 @@ os.makedirs(DATA, exist_ok=True)
 os.environ.setdefault('NITKA_CACHE', os.path.join(DATA, 'cache'))
 sys.path.insert(0, ROOT)
 from engine import classify, importers, mapkit, model, suggest          # noqa: E402
-from engine import sheets as sheets_mod          # noqa: E402
+from engine import sheets as sheets_mod, chrono          # noqa: E402
 
 WEB = os.path.join(ROOT, 'web')
 RENDERS = os.path.join(DATA, 'renders')
@@ -204,7 +204,7 @@ def merge_client(stored, incoming):
     if im.get('elev') in ('auto', 'dem', 'track'): meta['elev'] = im['elev']
     sheets = dict(stored.get('sheets', {}))
     for k, v in (incoming.get('sheets') or {}).items():
-        if k in ('region', 'overview', 'work', 'days', 'profile', 'photos', 'logo'): sheets[k] = bool(v)
+        if k in ('region', 'overview', 'work', 'days', 'profile', 'photos', 'logo', 'times'): sheets[k] = bool(v)
         elif k == 'work_scale' and v in (50000, 100000, 200000): sheets[k] = v
         elif k == 'scheme' and v in ('auto', 'sheet', 'overview', 'none'): sheets[k] = v
         elif k == 'base' and v in ('gsh', 'otm'): sheets[k] = v
@@ -318,6 +318,7 @@ def build_status(pid):
         st.update(state='error', error='Сборка прервалась из-за перезапуска сервера — запустите ещё раз.')
     if st.get('finished'): st['expires'] = st['finished'] + KEEP_DAYS * 86400
     st['keep_days'] = KEEP_DAYS
+    st['docx'] = st.get('state') == 'done' and os.path.exists(os.path.join(render_dir(pid), 'grafik_dvizheniya.docx'))
     return st
 
 def janitor():
@@ -601,6 +602,15 @@ class H(BaseHTTPRequestHandler):
                 proj['variants'] = [v for v in proj.get('variants', []) if v['id'] in used]
                 save_project(pid, uid, proj)
                 return self.send(200, dict(project=for_client(proj), msg=msg))
+            if sub == 'day-radial' and m == 'POST':      # весь день — радиальный выход (куски склеиваются в один)
+                try: day = int(self.json().get('day'))
+                except (TypeError, ValueError): raise Err(400, 'Не указан день.')
+                r = classify.day_radial(proj, day)
+                if r['ok']: save_project(pid, uid, proj)
+                return self.send(200, dict(project=for_client(proj), **r))
+            if sub == 'chrono' and m == 'POST':      # хронометраж → записи на треке (ещё не точки: турист проверяет и принимает)
+                text = str(self.json().get('text') or '')[:60000]
+                return self.send(200, chrono.place(proj, text))
             if sub == 'source-delete' and m == 'POST':
                 classify.remove_source(proj, str(self.json().get('id') or '')); save_project(pid, uid, proj)
                 return self.send(200, dict(project=for_client(proj)))
@@ -711,7 +721,7 @@ class H(BaseHTTPRequestHandler):
         if len(a) != 2: raise Err(404, 'нет')
         pid, name = a
         uid, proj, row = self.project(pid)
-        if not re.fullmatch(r'[A-Za-z0-9_\-]+(\.prev|\.thumb)?\.(png|jpg|pdf)', name): raise Err(404, 'нет')
+        if not re.fullmatch(r'[A-Za-z0-9_\-]+(\.prev|\.thumb)?\.(png|jpg|pdf|docx)', name): raise Err(404, 'нет')
         d = render_dir(pid); p = os.path.join(d, name)
         want_jpg = name.endswith('.jpg') and not name.endswith(('.prev.jpg', '.thumb.jpg'))
         if want_jpg:
@@ -725,7 +735,7 @@ class H(BaseHTTPRequestHandler):
         h = {}
         if q.get('dl'):
             title = re.sub(r'[\\/:*?"<>|]+', ' ', proj['meta'].get('title') or 'Поход').strip()
-            nice = f'{title} — {name}' if name != 'karty.pdf' else f'{title} — карты.pdf'
+            nice = f'{title} — карты.pdf' if name == 'karty.pdf' else f'{title} — график движения.docx' if name == 'grafik_dvizheniya.docx' else f'{title} — {name}'
             h['Content-Disposition'] = "attachment; filename*=UTF-8''" + urllib.parse.quote(nice)
         with open(p, 'rb') as f: data = f.read()
         self.send(200, data, mimetypes.guess_type(name)[0] or 'application/octet-stream', headers=h, cache='private, max-age=31536000' if q.get('v') else 'no-cache')
@@ -744,6 +754,7 @@ class H(BaseHTTPRequestHandler):
                     b = io.BytesIO(); Image.open(src).convert('RGB').save(b, 'JPEG', quality=93, subsampling=0, dpi=(300, 300)); z.writestr(s['file'][:-4] + '.jpg', b.getvalue())
                 else: z.write(src, s['file'])
             if os.path.exists(os.path.join(d, 'karty.pdf')): z.write(os.path.join(d, 'karty.pdf'), 'Все карты.pdf')
+            if os.path.exists(os.path.join(d, 'grafik_dvizheniya.docx')): z.write(os.path.join(d, 'grafik_dvizheniya.docx'), 'График движения.docx')
         title = re.sub(r'[\\/:*?"<>|]+', ' ', proj['meta'].get('title') or 'Поход').strip()
         self.send(200, buf.getvalue(), 'application/zip', headers={'Content-Disposition': "attachment; filename*=UTF-8''" + urllib.parse.quote(f'{title} — карты ({fmt}).zip')})
 
