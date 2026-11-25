@@ -44,11 +44,107 @@ def _interp(vals, pos):
             out[i] = out[a] + (out[b] - out[a]) * f
     return out
 
+TANGLE_R, TANGLE_PATH, TANGLE_RATIO = 60.0, 250.0, 4.0
+
+def tangles(pts, skip_pt=lambda i: False):
+    """«Клубки»: трек долго путается в круге 60 м (стоянка без времени в треке, плохой сигнал) — путь в нём
+    в 4+ раза длиннее расстояния между его краями и не меньше 250 м. [(i, j, лишний путь, м)] — края i и j остаются."""
+    n = len(pts); out = []; i = 0
+    while i < n - 2:
+        j = i
+        while j + 1 < n and dist(pts[i][:2], pts[j + 1][:2]) < TANGLE_R: j += 1
+        if j - i >= 6 and not any(skip_pt(k) for k in range(i, j + 1)):
+            path = sum(dist(pts[k][:2], pts[k + 1][:2]) for k in range(i, j)); span = dist(pts[i][:2], pts[j][:2])
+            if path >= TANGLE_PATH and path >= TANGLE_RATIO * max(span, 20.0):
+                out.append((i, j, path - span)); i = j; continue
+        i += 1
+    return out
+
+JOIN_M, JOIN_TAIL = 300.0, 400
+
+def neighbours(proj):
+    """Соседние по ходу маршрута куски, которые стыкуются (конец одного у начала другого): [(A, B)]."""
+    ps = sorted((p for p in proj.get('pieces', []) if p.get('role') in ('main', 'radial') and len(p.get('pts') or []) >= 2),
+                key=lambda p: (p.get('day') or 999, p.get('order') or 0))
+    return [(a, b) for a, b in zip(ps, ps[1:]) if dist(a['pts'][-1][:2], b['pts'][0][:2]) < JOIN_M]
+
+def junction_tangles(proj):
+    """Клубки на стыке двух кусков (часы перезапустили на стоянке, на ночёвке начался новый файл):
+    [(A, B, i0 — край в A, i1 — край в B, лишний путь, м)]."""
+    out = []
+    for A, B in neighbours(proj):
+        a, b = A['pts'], B['pts']
+        ta = max(0, len(a) - JOIN_TAIL); tail, head = a[ta:], b[:JOIN_TAIL]
+        man = {_k(q) for q in (A.get('man') or []) + (B.get('man') or [])}
+        same = len(tail) and len(head) and dist(tail[-1][:2], head[0][:2]) < 0.5      # конец A = начало B (так сохраняет редактор)
+        chain = tail + (head[1:] if same else head); nA = len(tail); off = 1 if same else 0
+        oks = set(A.get('okseg') or [])
+        for i, j, extra in tangles(chain, lambda k: _k(chain[k]) in man):
+            if i >= nA - 1 or j < nA: continue      # не через стык
+            i0, i1 = ta + i, j - nA + off
+            if f'tangle:{_k(a[i0])}' in oks or i1 >= len(b) - 1 or i0 < 1: continue
+            out.append((A, B, i0, i1, extra))
+    return out
+
+def _untangle_join(A, B, i0, i1):
+    """Спрямить клубок на стыке: A — до i0 и прямо к B[i1], B — с i1."""
+    _remember(A); _remember(B)
+    ta, tb = piece_times(A), piece_times(B)
+    before = length_km(A['pts']) + length_km(B['pts'])
+    A['pts'] = A['pts'][:i0 + 1] + [list(B['pts'][i1])]
+    if ta: set_times(A, ta[:i0 + 1] + [max(ta[i0], tb[i1]) if tb else ta[-1]])
+    B['pts'] = B['pts'][i1:]
+    if tb: set_times(B, tb[i1:])
+    for p in (A, B): p['km'] = round(length_km(p['pts']), 2)
+    return before - A['km'] - B['km']
+
+def untangle(proj, piece=None, i0=None, i1=None, piece2=None):
+    """Спрямить клубок (i0, i1 — края; на стыке — i0 в куске piece, i1 в piece2) или все клубки во всех кусках
+    (или в одном), в том числе на стыках. Шаг можно отменить."""
+    done = 0; saved = 0.0
+    if piece2:
+        A = next((p for p in proj.get('pieces', []) if p['id'] == piece), None); B = next((p for p in proj.get('pieces', []) if p['id'] == piece2), None)
+        try: i0, i1 = int(i0), int(i1)
+        except (TypeError, ValueError): return dict(ok=False, msg='Не указан участок.')
+        if not A or not B or not (0 < i0 < len(A['pts'])) or not (0 <= i1 < len(B['pts']) - 1):
+            return dict(ok=False, msg='Куски изменились — обнови страницу.')
+        saved = _untangle_join(A, B, i0, i1)
+        return dict(ok=True, msg=f'Клубок на стыке «{A.get("name", "")}» и «{B.get("name", "")}» спрямлён, убрано {str(round(saved, 2)).replace(".", ",")} км. Не то — «Отменить правку» у обоих кусков.')
+    if piece is None and i0 is None:
+        for A, B, a, b, _ in junction_tangles(proj):
+            if len(A['pts']) > a and len(B['pts']) > b + 1: saved += _untangle_join(A, B, a, b); done += 1
+    for p in proj.get('pieces', []):
+        if p.get('role') not in EDIT_ROLES or (piece and p['id'] != piece) or len(p.get('pts', [])) < 4: continue
+        man = {_k(q) for q in p.get('man') or []}; oks = set(p.get('okseg') or [])
+        pts = p['pts']
+        if i0 is not None:
+            T = [(int(i0), int(i1), 0.0)]
+        else:
+            T = [t for t in tangles(pts, lambda k: _k(pts[k]) in man) if f'tangle:{_k(pts[t[0]])}' not in oks]
+        T = [t for t in T if 0 <= t[0] < t[1] < len(pts) and t[1] - t[0] >= 2]
+        if not T: continue
+        _remember(p); ts = piece_times(p)
+        before = length_km(pts)
+        drop = set(k for a, b, _ in T for k in range(a + 1, b))
+        p['pts'] = [q for k, q in enumerate(pts) if k not in drop]
+        if ts: set_times(p, [t for k, t in enumerate(ts) if k not in drop])
+        p['km'] = round(length_km(p['pts']), 2); saved += before - p['km']; done += len(T)
+    if not done: return dict(ok=False, msg='Клубков не нашлось.')
+    return dict(ok=True, msg=f'Спрямлено: {done} {_pl(done, "клубок", "клубка", "клубков")}, убрано {str(round(saved, 2)).replace(".", ",")} км лишнего пути. Не то — «Отменить правку» у куска.')
+
 def check(proj):
     """Находки по всем кускам: dict(kind='excursion'|'gap', piece, name, day, i0, i1, km, at, lat, lon)."""
     vmax = SPEED_MAX.get(proj.get('meta', {}).get('kind'), 40)
     tz = trip_tz(proj, next((p['pts'][0][1] for p in proj.get('pieces', []) if p.get('pts')), None))
     out = []
+    J = junction_tangles(proj)
+    covered = {}      # кусок → [(от, до)] — эти точки уже в клубке на стыке
+    for A, B, a, b, extra in J:
+        covered.setdefault(A['id'], []).append((a, len(A['pts']) - 1)); covered.setdefault(B['id'], []).append((0, b))
+        ta = piece_times(A)
+        out.append(dict(piece=A['id'], piece2=B['id'], name=f'{A.get("name", "")} → {B.get("name", "")}', day=A.get('day'), at=hm(ta[a], tz) if ta else None,
+                        lat=A['pts'][a][0], lon=A['pts'][a][1], kind='tangle', i0=a, i1=b, km=round(extra / 1000, 2),
+                        pts=len(A['pts']) - 1 - a + b, join=True))
     for p in proj.get('pieces', []):
         pts = p.get('pts') or []
         if p.get('role') not in EDIT_ROLES or len(pts) < 4: continue
@@ -75,7 +171,12 @@ def check(proj):
                 out.append(dict(base, kind='gap', i0=i, i1=i + 1, km=round(seg[i] / 1000, 2),
                                 mins=round((ts[i + 1] - ts[i]) / 60) if ts else None))
             i += 1
-    out.sort(key=lambda f: (f['kind'] != 'excursion', f['day'] or 999))
+        for a, b, extra in tangles(pts, lambda k: _k(pts[k]) in man):
+            if f'tangle:{_k(pts[a])}' in oks or any(x <= b and a <= y for x, y in covered.get(p['id'], [])): continue
+            out.append(dict(piece=p['id'], name=p.get('name', ''), day=p.get('day'), at=hm(ts[a], tz) if ts else None, lat=pts[a][0], lon=pts[a][1],
+                            kind='tangle', i0=a, i1=b, km=round(extra / 1000, 2), pts=b - a - 1))
+    order = {'excursion': 0, 'gap': 1, 'tangle': 2}
+    out.sort(key=lambda f: (order[f['kind']], f['day'] or 999))
     return out
 
 
@@ -136,7 +237,27 @@ def edit(proj, d):
     return dict(ok=False, msg='Неизвестное действие.')
 
 
-def replace(proj, d):
+def replace_many(proj, d):
+    """Сохранение из редактора нескольких кусков сразу (правка через стык). Сначала проверяем все, потом пишем."""
+    items = d.get('items') or []
+    if not items: return dict(ok=False, msg='Нечего сохранять.')
+    by = {p['id']: p for p in proj.get('pieces', [])}
+    if any(it.get('piece') not in by for it in items): return dict(ok=False, msg='Кусок не найден — обнови страницу.')
+    if any(len(it.get('pts') or []) < 2 for it in items): return dict(ok=False, msg='В куске должно остаться хотя бы две точки.')
+    extra = {}
+    for it in items:      # точка соседнего куска, ставшая концом этого (стык), сохраняет свою высоту и время
+        p = by[it['piece']]; ts = piece_times(p)
+        for i, q in enumerate(p['pts']): extra.setdefault(_k(q), (q[2] if len(q) > 2 else None, ts[i] if ts else None))
+    for A, B in neighbours(proj):
+        tb = piece_times(B); q = B['pts'][0]; extra.setdefault(_k(q), (q[2] if len(q) > 2 else None, tb[0] if tb else None))
+    res = [replace(proj, it, extra) for it in items]
+    bad = next((r for r in res if not r['ok']), None)
+    if bad: return bad
+    if len(items) == 1: return res[0]
+    total = sum(by[it['piece']]['km'] for it in items)
+    return dict(ok=True, msg=f'Сохранено кусков: {len(items)}, вместе {str(round(total, 2)).replace(".", ",")} км. Отменить — «Отменить правку» у каждого.')
+
+def replace(proj, d, extra=None):
     """Сохранение из редактора: кусок целиком. Точки, которые не менялись, сохраняют высоту и время;
     новые и передвинутые получают их по соседям (пропорционально пути) и считаются поставленными человеком."""
     p = next((x for x in proj.get('pieces', []) if x['id'] == d.get('piece')), None)
@@ -147,8 +268,11 @@ def replace(proj, d):
     old = p['pts']; ts = piece_times(p)
     known = {}
     for i, q in enumerate(old): known.setdefault(_k(q), (q[2] if len(q) > 2 else None, ts[i] if ts else None))
+    own = set(known)
+    for k, v in (extra or {}).items(): known.setdefault(k, v)
     has_ele = any(len(q) > 2 for q in old)
     eles = [known.get(_k(q), (None, None))[0] for q in new]; tms = [known.get(_k(q), (None, None))[1] for q in new]
+    if ts: tms = [t if _k(q) in own or i in (0, len(new) - 1) else None for i, (q, t) in enumerate(zip(new, tms))]      # время чужих точек — только для краёв
     pos = [0.0]
     for a, b in zip(new, new[1:]): pos.append(pos[-1] + dist(a, b))
     if has_ele:
@@ -169,7 +293,11 @@ def accept(proj, d):
     p = next((x for x in proj.get('pieces', []) if x['id'] == d.get('piece')), None)
     try: i0, i1 = int(d['i0']), int(d['i1'])
     except (KeyError, TypeError, ValueError): return dict(ok=False, msg='Не указан участок.')
-    if not p or not (0 <= i0 < len(p['pts']) and 0 <= i1 < len(p['pts'])): return dict(ok=False, msg='Кусок изменился — обнови страницу.')
+    if not p or not (0 <= i0 < len(p['pts']) and (d.get('kind') == 'tangle' or 0 <= i1 < len(p['pts']))): return dict(ok=False, msg='Кусок изменился — обнови страницу.')
+    if d.get('kind') == 'tangle':
+        keys = [f'tangle:{_k(p["pts"][i0])}']
+        p['okseg'] = list(dict.fromkeys((p.get('okseg') or []) + keys))[-500:]
+        return dict(ok=True, msg='Отмечено: это не ошибка. Проверка больше не покажет это место.')
     a, b = (i0 - 1, i0) if d.get('kind') == 'excursion' else (i0, i1)      # у выброса помечаем прыжок «туда» и «обратно»
     keys = [f'{_k(p["pts"][a])}|{_k(p["pts"][b])}']
     if d.get('kind') == 'excursion' and i1 + 1 < len(p['pts']): keys.append(f'{_k(p["pts"][i1])}|{_k(p["pts"][i1 + 1])}')

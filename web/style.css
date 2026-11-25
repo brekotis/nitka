@@ -628,3 +628,22 @@ body.editing .leaflet-container { outline: 4px solid #F68A1D; outline-offset: -4
   .edbar .seg.tools button { flex: 1 1 auto; padding: 6px 8px; font-size: 12.5px; }
   body.editing #maphandle { display: none; }
 }
+
+/* следующий шаг в редакторе — крупно, с номером */
+.edbar .edstep { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 7px 10px; border-radius: 10px; background: var(--sun-l); border: 2px solid var(--sun); font: 700 14.5px var(--body); color: var(--navy); animation: rise .2s var(--ease); }
+.edbar .edstep > span { flex: 1 1 260px; min-width: 0; }
+.stops-hint { display: flex; gap: 10px; align-items: flex-start; }
+.stop-dot { flex: none; width: 18px; height: 18px; margin-top: 2px; border-radius: 50%; background: rgba(86, 103, 125, .55); border: 2px solid #fff; box-shadow: 0 0 0 1px #56677D; }
+.finds .fi.orange { background: var(--orange); }
+.finds details.tangles { border-top: 1px solid var(--sky-l); padding: 6px 0; }
+.finds details.tangles summary { cursor: pointer; font-weight: 600; color: var(--navy); font-size: 13.5px; }
+.finds .find.sm b { font-size: 13.5px; }
+.edbar .edask { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 6px; padding: 8px 10px; border-radius: 10px;
+  background: #FFF6D6; border: 1.5px solid var(--yellow, #FEBC0E); font-size: 13.5px; line-height: 1.35; }
+.edbar .edask > span:first-child { flex: 1 1 260px; min-width: 0; }
+.edbar .edask .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+/* шапка похода не распирает страницу на ноутбучной ширине: имя сжимается с многоточием, карта — до остатка */
+.ed .top .who { min-width: 0; flex: 0 1 auto; }
+.ed .top .steps { min-width: 0; flex: 0 1 auto; }
+.ed-body { grid-template-columns: minmax(360px, 460px) minmax(0, 1fr); }
+@media (min-width: 881px) and (max-width: 1180px) { .ed .top .step:not(.on) > span:last-child { display: none; } }      /* узко — подписи только у текущего шага */

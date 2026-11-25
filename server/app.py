@@ -637,7 +637,10 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, dict(items=trackfix.check(proj)))
             if sub == 'track-edit' and m == 'POST':      # вырезать выброс, перерисовать участок, отменить, вернуть как было; из редактора — кусок целиком
                 d = self.json()
-                r = trackfix.replace(proj, d) if d.get('action') == 'replace' else trackfix.accept(proj, d) if d.get('action') == 'ok' else trackfix.edit(proj, d)
+                act = d.get('action')
+                r = (trackfix.replace(proj, d) if act == 'replace' else trackfix.replace_many(proj, d) if act == 'replace_many'
+                     else trackfix.accept(proj, d) if act == 'ok'
+                     else trackfix.untangle(proj, d.get('piece'), d.get('i0'), d.get('i1'), d.get('piece2')) if act == 'untangle' else trackfix.edit(proj, d))
                 if r['ok']: save_project(pid, uid, proj)
                 return self.send(200, dict(project=for_client(proj), **r))
             if sub == 'route' and m == 'GET':      # путь по тропам между двумя точками (BRouter) — для перерисовки и вариантов

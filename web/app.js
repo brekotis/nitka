@@ -497,14 +497,20 @@ function checkBlock() {
   const F = trackCheck();
   if (F === null) return `<div class="sec"><h3>Проверка трека</h3><div class="hint">Смотрю, нет ли выбросов и разрывов сигнала…</div></div>`;
   if (!F.length) return `<div class="sec"><h3>Проверка трека</h3><div class="hint">Выбросов и разрывов сигнала не нашлось.</div></div>`;
-  return `<div class="sec"><h3>Проверка трека <small>${F.length}</small></h3><div class="finds">${F.map((f, i) => {
+  const T = F.filter(f => f.kind === 'tangle'), tkm = T.reduce((s, f) => s + f.km, 0);
+  const rowsOf = list => list.map(f => [f, F.indexOf(f)]);
+  return `<div class="sec"><h3>Проверка трека <small>${F.length}</small></h3><div class="finds">${rowsOf(F.filter(f => f.kind !== 'tangle')).map(([f, i]) => {
     const where = esc([f.name, f.day ? 'день ' + f.day : '', f.at || ''].filter(Boolean).join(' · '));
     return f.kind === 'excursion'
       ? `<div class="find"><span class="fi red">!</span><div><b>Выброс: трек улетел на ${km(f.km)} км и вернулся</b><div class="hint">${where} · ${f.pts} ${plural(f.pts, 'точка', 'точки', 'точек')} — похоже на сбой GPS (спуфинг)</div></div>
           <div class="chips"><button class="btn sm" data-a="tcshow" data-i="${i}">Показать</button><button class="btn sm go" data-a="tccut" data-i="${i}">Вырезать</button><button class="btn sm" data-a="tced" data-i="${i}">В редакторе</button><button class="btn sm ghost" data-a="tcok" data-i="${i}">Это не ошибка</button></div></div>`
       : `<div class="find"><span class="fi blue">…</span><div><b>Разрыв сигнала: ${Math.round(f.km * 1000)} м без точек${f.mins ? `, ${f.mins} мин` : ''}</b><div class="hint">${where} · на карте здесь прямая</div></div>
           <div class="chips"><button class="btn sm" data-a="tcshow" data-i="${i}">Показать</button><button class="btn sm go" data-a="tcdraw" data-i="${i}">Дорисовать</button><button class="btn sm ghost" data-a="tcok" data-i="${i}">Это не ошибка</button></div></div>`;
-  }).join('')}</div><div class="hint">Любую правку можно отменить: «Отменить правку» и «Вернуть как было» — у куска на шаге «Дни». Там же — «Редактор трека» для любого куска.</div></div>`;
+  }).join('')}${T.length ? `<div class="find"><span class="fi orange">∞</span><div><b>Клубки: ${T.length} ${plural(T.length, 'место', 'места', 'мест')}, где трек путается на месте — ${km(tkm)} км лишнего пути</b>
+      <div class="hint">Стоянка без времени в треке или плохой сигнал: точки кружат в одном месте и добавляют километры. «Спрямить» оставит прямую между краями клубка.</div></div>
+      <div class="chips"><button class="btn sm go" data-a="tcuntall">Спрямить все</button></div></div>
+    <details class="tangles"><summary>Показать по одному</summary>${rowsOf(T).map(([f, i]) => `<div class="find sm"><span class="fi orange">∞</span><div><b>${km(f.km)} км лишнего · ${f.pts} ${plural(f.pts, 'точка', 'точки', 'точек')}${f.join ? ' · на стыке кусков' : ''}</b><div class="hint">${esc([f.name, f.day ? 'день ' + f.day : '', f.at || ''].filter(Boolean).join(' · '))}</div></div>
+      <div class="chips"><button class="btn sm" data-a="tcshow" data-i="${i}">Показать</button><button class="btn sm go" data-a="tcunt" data-i="${i}">Спрямить</button><button class="btn sm" data-a="tcued" data-i="${i}" title="Открыть в редакторе трека${f.join ? ' — оба куска сразу' : ''}">В редакторе</button><button class="btn sm ghost" data-a="tcok" data-i="${i}">Это не ошибка</button></div></div>`).join('')}</details>` : ''}</div><div class="hint">Любую правку можно отменить: «Отменить правку» и «Вернуть как было» — у куска на шаге «Дни». Там же — «Редактор трека» для любого куска.</div></div>`;
 }
 function exportBlock() {
   const st = S.gstep ?? 30, sp = S.gsplit || 'day';
@@ -526,6 +532,12 @@ function nearestIdx(p, latlng) {      // ближайшая точка куск�
   p.pts.forEach((q, i) => { const c = map.latLngToContainerPoint([q[0], q[1]]); const d = (c.x - cp.x) ** 2 + (c.y - cp.y) ** 2; if (!best || d < best.d) best = { d, i }; });
   return best && best.d < 42 * 42 ? best.i : null;
 }
+function drawHint() {      // что делать дальше, пока рисуется вариант
+  const n = (S.drawPts || []).length, kind = S.drawKind === 'exit' ? 'аварийный выход' : 'запасной вариант';
+  return n === 0 ? `Шаг 1 · Кликни, откуда начинается ${kind} — у нитки точка прилипнет к ней`
+    : `Шаг 2 · Кликай дальше по пути${S.routeOn ? ' — между кликами путь проложится по тропе' : ''}. Дошёл до конца — «Готово»`;
+}
+function updHint() { const el = $('.maphint .mh-t'); if (el && S.mode === 'draw') el.textContent = drawHint(); }
 async function addDrawPoint(q) {      // точка нового пути; «по тропе» — путь от предыдущей точки ищет BRouter
   const pts = S.drawPts = S.drawPts || []; S.drawSteps = S.drawSteps || [];
   const e = S.edit, p = e && pieceById(e.piece);
@@ -533,11 +545,11 @@ async function addDrawPoint(q) {      // точка нового пути; «п�
   if (S.routeOn && prev) {
     try {
       const r = await api('GET', `/api/projects/${S.pid}/route?a=${prev[0]},${prev[1]}&b=${q[0]},${q[1]}`, undefined, false, 'Ищу тропу…');
-      if (r.ok && r.pts.length > 1) { const add = r.pts.slice(1); pts.push(...add); S.drawSteps.push(add.length); drawPreview(); return; }
+      if (r.ok && r.pts.length > 1) { const add = r.pts.slice(1); pts.push(...add); S.drawSteps.push(add.length); drawPreview(); updHint(); return; }
       toast(r.msg || 'Тропу не нашёл — соединяю прямой', true);
     } catch (err) { toast('Тропу не нашёл — соединяю прямой', true); }
   }
-  pts.push(q); S.drawSteps.push(1); drawPreview();
+  pts.push(q); S.drawSteps.push(1); drawPreview(); updHint();
 }
 function drawPreview() {
   if (!map) return; if (!drawLayer) drawLayer = L.layerGroup().addTo(map); drawLayer.clearLayers();
@@ -738,6 +750,7 @@ function stepDays() {
       <label class="switch"><input type="checkbox" data-c="oneway" ${pr.meta.radial_one_way !== false ? 'checked' : ''}>Радиальные выходы считать в одну сторону</label>
       ${pr.pieces.some(p => p.tinfo) ? `<label class="field"><span>Часовой пояс похода — для времени выхода и привалов</span><select data-c="tz">${Array.from({ length: 11 }, (_, i) => i + 2).map(h => `<option value="${h}"${(pr.meta.tz ?? browserTz()) === h ? ' selected' : ''}>UTC+${h} · ${TZ_NAMES[h]}</option>`).join('')}</select></label>` : ''}
     </div>
+    ${stopsHint()}
     <div class="banner blue"><div><b>Нужно разделить кусок на два?</b> Например, один трек на два дня или радиалка, нарисованная вместе с основной ниткой.</div>
       <div class="chips"><button class="btn sm" data-a="cutmode">✂ Разрезать нитку на карте</button></div></div>
     ${(() => { const f = M.days.find(d => d.pieces.length); return f && f.n > 1 ? `<div class="banner"><div><b>Первые ${f.n - 1} ${plural(f.n - 1, 'день', 'дня', 'дней')} без треков.</b> Похоже, числа в названиях треков — это числа месяца, а не номера дней.</div>
@@ -798,6 +811,10 @@ function pointEditor(q) {
 }
 // ---------------------------------------------------------------- хронометраж → точки
 const WHERE = { stop: m => `на остановке, ${m} мин`, move: () => 'на ходу', none: () => 'в это время трека нет' };
+function stopsHint() {      // серые кружки на карте — остановки из трека с часов: на них можно нажать
+  const n = P().pieces.reduce((s, p) => s + (p.tinfo && ['main', 'radial'].includes(p.role) ? p.tinfo.stops.length : 0), 0);
+  return n ? `<div class="banner blue stops-hint"><span class="stop-dot"></span><div><b>Серые кружки на карте — ${n} ${plural(n, 'остановка', 'остановки', 'остановок')} из трека с часов.</b> Нажми на кружок — выбери, что там было (привал, обед, брод, перевал…), и появится точка со временем.</div></div>` : '';
+}
 function chronoBlock() {
   if (!P().pieces.some(p => p.tinfo)) return '';
   const c = S.chrono;
@@ -824,7 +841,7 @@ function stepPoints() {
     ${S.selPoint || S.selBand ? '' : todoBlock(td.filter(t => t.step === 'points'), 'Стоит сделать')}`;
   if (S.ptab === 'bands') return head + stepBands();
   if (S.ptab === 'obst' && showObst()) return head + stepObst();
-  return `${head}<p>Ночёвки, перевалы, вода, достопримечательности — всё, что будет на картах. Нажми на точку, чтобы поправить.</p>${chronoBlock()}
+  return `${head}<p>Ночёвки, перевалы, вода, достопримечательности — всё, что будет на картах. Нажми на точку, чтобы поправить.</p>${stopsHint()}${chronoBlock()}
     <div class="chips"><button class="btn sm go" data-a="padd">＋ Точка на карте</button><input type="text" data-c="q" value="${esc(S.q)}" placeholder="поиск" style="flex:1;min-width:120px;min-height:32px;padding:3px 10px"></div>
     ${daysModel().max > 1 && pts.some(q => q.type === 'camp') ? `<div class="chips"><button class="btn sm" data-a="sugg" data-w="camps">Ночёвки по концам дней…</button></div>` : ''}
     <div class="chips"><button class="chip${S.filter === 'all' ? ' on' : ''}" data-a="filter" data-f="all">Все <span class="cnt">${pts.length - (counts.skip || 0)}</span></button>
@@ -1174,7 +1191,7 @@ function setMode(m, text) {
   const route = `<button class="chip${S.routeOn ? ' on' : ''}" data-a="routetoggle" title="Путь между кликами — по тропам OpenStreetMap (сервис BRouter). Вне троп — прямая">по тропе</button>`;
   const extra = m === 'draw' || m === 'redraw' ? `${route}<button class="btn sm" data-a="drawundo" title="Убрать последнюю точку">↶</button><button class="btn sm go" data-a="${m === 'redraw' ? 'redrawdone' : 'drawdone'}">Готово</button>`
     : m === 'choose' ? '<button class="btn sm warn" data-a="editcut">Удалить — соединить прямой</button><button class="btn sm go" data-a="editredraw">Перерисовать</button>' : '';
-  const h = document.createElement('div'); h.className = 'maphint'; h.innerHTML = `${esc(text)} ${extra}<button class="icon-btn" data-a="modeoff" title="Отмена">${I.x}</button>`;
+  const h = document.createElement('div'); h.className = 'maphint'; h.innerHTML = `<span class="mh-t">${esc(m === 'draw' ? drawHint() : text)}</span> ${extra}<button class="icon-btn" data-a="modeoff" title="Отмена">${I.x}</button>`;
   $('.mapwrap').append(h); $('#map').style.cursor = 'crosshair';
   if (isPhone() && mapSize() !== 'big') { S.mapTemp = 'big'; applyMapSize(); }   // на телефоне для клика по карте она разворачивается сама
 }
@@ -1294,12 +1311,14 @@ function fitAll() {
 function drawPieces() {
   pieceLayer.clearLayers(); lines = {};
   const draw = (p, style) => {
-    if (ED && ED.active() && ED.piece() === p.id) return;
+    const editing = ED && ED.active();
+    if (editing && ED.has(p.id)) return;
+    if (editing) style = { ...style, opacity: .45, weight: Math.max(style.weight || 4, 5) };      // в редакторе — бледные, на них можно нажать
     const ll = p.pts.map(q => [q[0], q[1]]);
-    L.polyline(ll, { color: '#fff', weight: (style.weight || 4) + 3.5, opacity: .9, interactive: false }).addTo(pieceLayer);
+    L.polyline(ll, { color: '#fff', weight: (style.weight || 4) + 3.5, opacity: editing ? .5 : .9, interactive: false }).addTo(pieceLayer);
     const l = L.polyline(ll, style).addTo(pieceLayer);
-    l.on('click', ev => { L.DomEvent.stopPropagation(ev); if (S.mode) return mapClick(ev.latlng); S.selPiece = p.id; if (S.step !== 'days') go(`#/p/${S.pid}/days`); else { paintPanel(); } drawPieces(); const r = $(`.pc[data-id="${p.id}"]`); r && r.scrollIntoView({ block: 'center', behavior: 'smooth' }); });
-    l.bindTooltip(`${p.day ? 'День ' + p.day + ' · ' : ''}${p.name} · ${km(p.km || 0)} км`, { sticky: true, className: 'tt' });
+    l.on('click', ev => { L.DomEvent.stopPropagation(ev); if (S.mode === 'editor') return ED && ED.pieceClick(p.id, ev.latlng); if (S.mode) return mapClick(ev.latlng); S.selPiece = p.id; if (S.step !== 'days') go(`#/p/${S.pid}/days`); else { paintPanel(); } drawPieces(); const r = $(`.pc[data-id="${p.id}"]`); r && r.scrollIntoView({ block: 'center', behavior: 'smooth' }); });
+    l.bindTooltip(`${p.day ? 'День ' + p.day + ' · ' : ''}${p.name} · ${km(p.km || 0)} км${editing ? ' — нажми, чтобы править вместе' : ''}`, { sticky: true, className: 'tt' });
     lines[p.id] = l;
   };
   const ps = P().pieces;
@@ -1487,9 +1506,15 @@ async function trackEdit(body, msg) {
   try { const r = await api('POST', `/api/projects/${S.pid}/track-edit`, body, false, msg || 'Правлю нитку…'); S.proj = r.project; toast(r.msg, !r.ok); S.tcKey = null; editLayer && editLayer.clearLayers(); paintPanel(); drawMap(); return r; }
   catch (e) { fail(e); }
 }
-A.tcshow = el => { const f = (S.tc || [])[+el.dataset.i], p = f && pieceById(f.piece); if (p) showStretch(p, f.kind === 'gap' ? f.i0 : f.i0 - 1, f.kind === 'gap' ? f.i1 : f.i1 + 1, true); };
+A.tcshow = el => { const f = (S.tc || [])[+el.dataset.i], p = f && pieceById(f.piece); if (!p) return;
+  if (f.piece2) { const q = pieceById(f.piece2); return q && showStretch({ ...p, pts: [...p.pts.slice(f.i0), ...q.pts.slice(0, f.i1 + 1)] }, 0, p.pts.length - f.i0 + f.i1, true); }
+  showStretch(p, f.kind === 'excursion' ? f.i0 - 1 : f.i0, f.kind === 'excursion' ? f.i1 + 1 : f.i1, true); };
 A.tccut = el => { const f = (S.tc || [])[+el.dataset.i]; if (f) trackEdit({ piece: f.piece, action: 'cut', i0: f.i0, i1: f.i1 }, 'Вырезаю выброс…'); };
 A.tcdraw = el => { const f = (S.tc || [])[+el.dataset.i]; if (f) openEditor(f.piece, { tool: 'redraw', pick: [f.i0, f.i1], focus: [f.i0, f.i1] }); };
+A.tcunt = el => { const f = (S.tc || [])[+el.dataset.i]; if (f) trackEdit({ action: 'untangle', piece: f.piece, piece2: f.piece2 || undefined, i0: f.i0, i1: f.i1 }, 'Спрямляю…'); };
+A.tcued = el => { const f = (S.tc || [])[+el.dataset.i]; if (!f) return;
+  openEditor(f.piece, f.piece2 ? { with: [f.piece2], tool: 'cut', pick: [{ piece: f.piece, i: f.i0 }, { piece: f.piece2, i: f.i1 }], focus: true } : { tool: 'cut', pick: [f.i0, f.i1], focus: true }); };
+A.tcuntall = () => trackEdit({ action: 'untangle' }, 'Спрямляю клубки…');
 A.tced = el => { const f = (S.tc || [])[+el.dataset.i]; if (f) openEditor(f.piece, { tool: 'cut', pick: [Math.max(0, f.i0 - 1), f.i1 + 1], focus: [f.i0 - 1, f.i1 + 1] }); };
 A.tcok = el => { const f = (S.tc || [])[+el.dataset.i]; if (f) trackEdit({ piece: f.piece, action: 'ok', kind: f.kind, i0: f.i0, i1: f.i1 }, 'Отмечаю…'); };
 A.edopen = el => openEditor(el.dataset.id);
@@ -1505,7 +1530,7 @@ A.redrawdone = async () => {
   const pts = S.drawPts || []; setMode(null);
   await trackEdit({ piece: e.piece, action: 'redraw', i0: e.i0, i1: e.i1, pts }, 'Перерисовываю участок…');
 };
-A.routetoggle = el => { S.routeOn = !S.routeOn; el.classList.toggle('on', S.routeOn); toast(S.routeOn ? 'По тропе: путь между кликами проложит BRouter по тропам OpenStreetMap' : 'Прямыми отрезками'); };
+A.routetoggle = el => { S.routeOn = !S.routeOn; el.classList.toggle('on', S.routeOn); updHint(); toast(S.routeOn ? 'По тропе: теперь кликай по карте — путь между кликами проложится по тропам' : 'Прямыми отрезками: путь пойдёт прямо через твои клики'); };
 A.pundo = el => trackEdit({ piece: el.dataset.id, action: 'undo' }, 'Отменяю…');
 A.preset = el => trackEdit({ piece: el.dataset.id, action: 'reset' }, 'Возвращаю исходный трек…');
 A.gstep = el => { S.gstep = +el.dataset.v; paintPanel(); };
@@ -1518,7 +1543,7 @@ A.vshow = el => { const ll = P().pieces.filter(p => p.var === el.dataset.id).fla
 A.vunmake = el => varOp({ action: 'unmake', var: el.dataset.id });
 A.vsplit = el => varOp({ action: 'split', piece: el.dataset.id });
 A.drawvar = el => { S.drawKind = el.dataset.k; S.drawPts = []; setMode('draw', `Ставь точки ${el.dataset.k === 'alt' ? 'запасного варианта' : 'аварийного выхода'} кликами по карте; у нитки точка прилипнет к ней`); };
-A.drawundo = () => { const n = (S.drawSteps || []).pop() || 1; (S.drawPts || []).splice(-n, n); drawPreview(); };
+A.drawundo = () => { const n = (S.drawSteps || []).pop() || 1; (S.drawPts || []).splice(-n, n); drawPreview(); updHint(); };
 A.drawdone = async () => {
   const pts = S.drawPts || []; if (pts.length < 2) return toast('Нужно хотя бы две точки', true);
   const kind = S.drawKind; setMode(null); await varOp({ action: 'draw', pts, kind }, 'Сохраняю вариант…');
