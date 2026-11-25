@@ -474,6 +474,16 @@ function radKm(p) {      // [путь туда, обратный путь], км
   if (o) return o;
   return radShape(p) === 'loop' ? [p.km || 0, 0] : [p.km || 0, p.km || 0];
 }
+// Время: пояс браузера (часы) и итог дня по кускам с временем — выход, приход, чистое ходовое время
+const browserTz = () => -new Date().getTimezoneOffset() / 60;
+const toMin = s => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
+const hmDur = sec => { const m = Math.round(sec / 60); return `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`; };
+function dayTime(pieces) {
+  const t = pieces.map(p => p.tinfo).filter(Boolean); if (!t.length) return null;
+  const a = t.reduce((x, y) => (toMin(y.start) < toMin(x.start) ? y : x)).start, b = t.reduce((x, y) => (toMin(y.end) > toMin(x.end) ? y : x)).end;
+  return { start: a, end: b, move: t.reduce((s, x) => s + x.move, 0), stops: t.reduce((s, x) => s + x.stops.length, 0) };
+}
+const TZ_NAMES = { 2: 'Калининград', 3: 'Москва', 4: 'Самара, Грузия', 5: 'Екатеринбург', 6: 'Омск', 7: 'Красноярск', 8: 'Иркутск', 9: 'Якутск', 10: 'Владивосток', 11: 'Магадан', 12: 'Камчатка' };
 function dayKm(pieces) {
   const k = P().meta.kcoef || 1;
   return pieces.reduce((s, p) => { if (p.role !== 'radial') return s + (p.km || 0); const [o, b] = radKm(p); return s + o + (radOnce(p) ? 0 : b); }, 0) * k;
@@ -564,6 +574,9 @@ function infoText(i) {
   const va = (i.variants || []).filter(v => v.kind === 'alt').length, ve = (i.variants || []).filter(v => v.kind === 'exit').length;
   if (va) parts.push(`${va} ${plural(va, 'запасной вариант', 'запасных варианта', 'запасных вариантов')}`);
   if (ve) parts.push(`${ve} ${plural(ve, 'аварийный выход', 'аварийных выхода', 'аварийных выходов')}`);
+  if (i.timed) parts.push(`время записано у ${i.timed} ${plural(i.timed, 'куска', 'кусков', 'кусков')}`);
+  if (i.stops) parts.push(`${i.stops} ${plural(i.stops, 'остановка', 'остановки', 'остановок')}${i.stars_km >= 0.05 ? ` — «звёздочки» на них убраны, это ${km(i.stars_km)} км пути, которого не было` : ''}`);
+  if (i.upgraded) parts.push(`к ${i.upgraded} ${plural(i.upgraded, 'куску', 'кускам', 'кускам')}, загруженным раньше, добавлено время — дни и правки остались`);
   return parts.join(', ');
 }
 function stepTracks() {
@@ -590,7 +603,7 @@ function bindDrop() {
   ['dragleave', 'drop'].forEach(n => d.addEventListener(n, e => { e.preventDefault(); d.classList.remove('over'); }));
   d.addEventListener('drop', e => upload([...e.dataTransfer.files]));
   $('#linkf').onsubmit = async e => { e.preventDefault(); const v = e.target.link.value.trim(); if (!v) return; S.lastInfo = null;
-    if (await importOne(() => api('POST', `/api/projects/${S.pid}/import${S.importAs && S.importAs !== 'main' ? '?as=' + S.importAs : ''}`, { link: v }, false, 'Скачиваю трек с nakarte.me и разбираю его…'))) { toast('Трек по ссылке загружен'); paintPanel(true); drawMap(true); } };
+    if (await importOne(() => api('POST', `/api/projects/${S.pid}/import?tz=${browserTz()}${S.importAs && S.importAs !== 'main' ? '&as=' + S.importAs : ''}`, { link: v }, false, 'Скачиваю трек с nakarte.me и разбираю его…'))) { toast('Трек по ссылке загружен'); paintPanel(true); drawMap(true); } };
 }
 async function importOne(call) {
   await flush(); const d = $('#drop'); d && d.classList.add('busy');
@@ -606,7 +619,7 @@ async function upload(files) {
   files.sort((a, b) => a.name.localeCompare(b.name, 'ru', { numeric: true }));
   for (const [i, f] of files.entries()) {
     const msg = `Читаю «${f.name}»${files.length > 1 ? ` — ${i + 1} из ${files.length}` : ''}${f.size > 3e6 ? ' (файл большой, это может занять полминуты)' : ''}…`;
-    if (await importOne(() => api('POST', `/api/projects/${S.pid}/import?name=${encodeURIComponent(f.name)}${S.importAs && S.importAs !== 'main' ? '&as=' + S.importAs : ''}`, f, true, msg))) ok++;
+    if (await importOne(() => api('POST', `/api/projects/${S.pid}/import?name=${encodeURIComponent(f.name)}&tz=${browserTz()}${S.importAs && S.importAs !== 'main' ? '&as=' + S.importAs : ''}`, f, true, msg))) ok++;
   }
   if (ok) { toast(ok > 1 ? `Загружено файлов: ${ok}` : 'Трек загружен'); paintPanel(true); drawMap(true); }
 }
@@ -629,6 +642,7 @@ function stepDays() {
       <div class="field"><span>Коэффициент к километражу</span><div class="chips">${[[1, '1,0 — как на карте'], [1.2, '1,2 — горный рельеф']].map(([v, t]) => `<button class="chip${Math.abs(k - v) < .001 ? ' on' : ''}" data-a="kcoef" data-v="${v}">${t}</button>`).join('')}
         <input type="number" step="0.05" min="1" max="3" value="${k}" data-c="kcoef" style="width:84px;min-height:32px;padding:2px 8px" aria-label="Свой коэффициент"></div></div>
       <label class="switch"><input type="checkbox" data-c="oneway" ${pr.meta.radial_one_way !== false ? 'checked' : ''}>Радиальные выходы считать в одну сторону</label>
+      ${pr.pieces.some(p => p.tinfo) ? `<label class="field"><span>Часовой пояс похода — для времени выхода и привалов</span><select data-c="tz">${Array.from({ length: 11 }, (_, i) => i + 2).map(h => `<option value="${h}"${(pr.meta.tz ?? browserTz()) === h ? ' selected' : ''}>UTC+${h} · ${TZ_NAMES[h]}</option>`).join('')}</select></label>` : ''}
     </div>
     <div class="banner blue"><div><b>Нужно разделить кусок на два?</b> Например, один трек на два дня или радиалка, нарисованная вместе с основной ниткой.</div>
       <div class="chips"><button class="btn sm" data-a="cutmode">✂ Разрезать нитку на карте</button></div></div>
@@ -644,7 +658,8 @@ function stepDays() {
     ${single ? `<div class="day"><header>День 1 <small>${km(dayKm(M.loose))} км</small></header>${M.loose.map(p => pieceRow(p, 1)).join('')}</div>` : ''}
     ${M.days.map(d => { const dt = dateOf(d.n);
       if (!d.pieces.length) return `<div class="day rest"><header>День ${d.n}${dt ? ' · ' + dm(dt) : ''} <small>днёвка — трека нет</small></header></div>`;
-      return `<div class="day${d.n % 2 ? '' : ' even'}"><header>День ${d.n}${dt ? ` · ${dm(dt)}, ${wd(dt)}` : ''} <small class="num">≈ ${km(dayKm(d.pieces))} км</small></header>${d.pieces.map(p => pieceRow(p, M.max)).join('')}</div>`; }).join('')}
+      const tt = dayTime(d.pieces);
+      return `<div class="day${d.n % 2 ? '' : ' even'}"><header>День ${d.n}${dt ? ` · ${dm(dt)}, ${wd(dt)}` : ''} <small class="num">≈ ${km(dayKm(d.pieces))} км</small>${tt ? `<span class="dtime num" title="Выход — приход по местному времени; ЧХВ — чистое ходовое время без остановок">${tt.start}–${tt.end} · ЧХВ ${hmDur(tt.move)}${tt.stops ? ` · ${tt.stops} ${plural(tt.stops, 'привал', 'привала', 'привалов')}` : ''}</span>` : ''}</header>${d.pieces.map(p => pieceRow(p, M.max)).join('')}</div>`; }).join('')}
     ${varsBlock()}
     ${M.skipped.length ? `<details class="day skip"><summary style="list-style:none;cursor:pointer"><header>Не используются <small>${M.skipped.length} · нажми, чтобы показать</small></header></summary>${M.skipped.map(p => pieceRow(p, M.max)).join('')}</details>` : ''}
     <div class="next"><button class="btn" data-a="step" data-step="tracks">← Треки</button><button class="btn go" data-a="step" data-step="points">Дальше: точки →</button></div>`;
@@ -914,6 +929,7 @@ function workScaleField(sh) {
   return `<div class="field"><span>Масштаб рабочей карты</span><div class="chips">${chips}</div>${tip}</div>${sh.work !== false ? scheme : ''}`;
 }
 function stepMaps() {
+  let hasT = false;
   const pr = P(); const sh = pr.sheets || {}; const b = S.build || { state: 'none', sheets: [] };
   const running = ['running', 'queued'].includes(b.state); const sheets = b.sheets || []; const ok = sheets.filter(s => s.state === 'ok');
   const hasTrack = pr.pieces.some(p => p.role !== 'skip');
@@ -953,10 +969,11 @@ function stepMaps() {
           <div class="cap"><b>${esc(s.title)}</b><div class="s">${km(s.w_cm)} × ${km(s.h_cm)} см${s.note ? ' · ' + esc(s.note) : ''}</div>
           <div class="dl"><a href="/files/${S.pid}/${s.file}?dl=1" data-stop>PNG</a><a href="/files/${S.pid}/${s.file.replace('.png', '.jpg')}?dl=1" data-stop>JPG</a>${s.frame ? `<a href="#" data-stop data-a="frame" data-i="${i}" title="Сдвинуть рамку или поменять масштаб этого листа">Рамка</a>` : ''}</div></div></div>`
         : `<div class="sheet ${s.state === 'run' ? 'run' : ''}"><div class="pic"><div class="wait">${s.state === 'run' ? 'рисую' : s.state === 'err' ? 'ошибка' : 'ждёт'}</div></div><div class="cap"><b>${esc(s.title)}</b><div class="s">${s.state === 'err' ? esc(s.error || '') : '&nbsp;'}</div></div></div>`).join('')}</div>
+      ${(() => { hasT = !!(sm && sm.days && sm.days.some(d => d.t_start)); return ''; })()}
       ${sm && sm.days ? `<div class="sec"><h3>${isPlan() ? 'График движения (план)' : 'Сводка по дням'} <span class="hint" style="text-transform:none;letter-spacing:0;font:400 13.5px var(--body)">— ${isPlan() ? 'для заявки' : 'для графика движения'}</span></h3>
-        <div class="tblwrap"><table class="sum"><thead><tr><th>День</th><th>Дата</th><th class="n">Км</th><th class="n">Набор</th><th class="n">Сброс</th><th class="n">Высоты, м</th><th class="obj">${sm.days.some(d => (d.key_objects || []).length) ? 'Определяющие препятствия' : 'Препятствия'}</th></tr></thead><tbody>
-        ${sm.days.map(d => `<tr><td>${d.n}</td><td>${d.date}</td><td class="n">${km(d.km)}</td><td class="n">+${d.up}</td><td class="n">−${d.dn}</td><td class="n">${d.zmin}–${d.zmax}</td><td>${esc(((d.key_objects || []).length ? d.key_objects : d.objects).join('; '))}</td></tr>`).join('')}
-        <tr><td colspan="2"><b>Всего</b></td><td class="n"><b>${km(sm.km)}</b></td><td class="n"><b>+${sm.up}</b></td><td class="n"><b>−${sm.dn}</b></td><td></td><td class="hint">${sm.kcoef !== 1 ? `км с коэффициентом ${km(sm.kcoef)}; ` : ''}высоты — ${sm.elev === 'track' ? 'из трека' : 'по модели рельефа'}</td></tr></tbody></table></div>
+        <div class="tblwrap"><table class="sum"><thead><tr><th>День</th><th>Дата</th><th class="n">Км</th><th class="n">Набор</th><th class="n">Сброс</th><th class="n">Высоты, м</th>${hasT ? '<th class="n">Выход</th><th class="n">Приход</th><th class="n">ЧХВ</th><th class="n">Привалы</th>' : ''}<th class="obj">${sm.days.some(d => (d.key_objects || []).length) ? 'Определяющие препятствия' : 'Препятствия'}</th></tr></thead><tbody>
+        ${sm.days.map(d => `<tr><td>${d.n}</td><td>${d.date}</td><td class="n">${km(d.km)}</td><td class="n">+${d.up}</td><td class="n">−${d.dn}</td><td class="n">${d.zmin}–${d.zmax}</td>${hasT ? `<td class="n">${d.t_start || ''}</td><td class="n">${d.t_end || ''}</td><td class="n">${d.move || ''}</td><td class="n">${d.n_stops ? `${d.n_stops} · ${d.pause}` : ''}</td>` : ''}<td>${esc(((d.key_objects || []).length ? d.key_objects : d.objects).join('; '))}</td></tr>`).join('')}
+        <tr><td colspan="2"><b>Всего</b></td><td class="n"><b>${km(sm.km)}</b></td><td class="n"><b>+${sm.up}</b></td><td class="n"><b>−${sm.dn}</b></td><td></td>${hasT ? `<td></td><td></td><td class="n"><b>${sm.move || ''}</b></td><td></td>` : ''}<td class="hint">${sm.kcoef !== 1 ? `км с коэффициентом ${km(sm.kcoef)}; ` : ''}высоты — ${sm.elev === 'track' ? 'из трека' : 'по модели рельефа'}</td></tr></tbody></table></div>
         ${sm.camps.length ? `<div class="hint"><b>Ночёвки:</b> ${sm.camps.map(c => `${c.lab} — ${[c.date, c.name, c.h + ' м'].filter(Boolean).map(esc).join(', ')}`).join('; ')}</div>` : ''}</div>` : ''}
       ${sm && sm.variants && sm.variants.length ? `<div class="sec"><h3>Запасные варианты и аварийные выходы</h3>
         <div class="tblwrap"><table class="sum vtbl"><thead><tr><th>№</th><th>Вариант</th><th>Откуда — куда</th><th class="n">Км</th><th class="n">Набор</th><th class="n">Сброс</th><th>Препятствия</th></tr></thead><tbody>
@@ -1125,7 +1142,23 @@ function drawBands() {
   }
   if (S.bandA) L.circleMarker(S.bandA, { radius: 8, color: '#133C6A', weight: 3, fillColor: '#FEBC0E', fillOpacity: 1, interactive: false }).addTo(bandLayer);
 }
-function drawMap(fit) { if (!map) return; drawBands(); drawPieces(); drawPoints(); if (fit) fitAll(); }
+function drawMap(fit) { if (!map) return; drawBands(); drawPieces(); drawStops(); drawPoints(); if (fit) fitAll(); }
+let stopLayer = null;
+function drawStops() {
+  if (!map) return; if (!stopLayer) stopLayer = L.layerGroup().addTo(map); stopLayer.clearLayers();
+  if (!['days', 'points'].includes(S.step)) return;
+  const named = P().points.filter(q => q.time);
+  for (const p of P().pieces) {
+    if (!p.tinfo || !['main', 'radial'].includes(p.role)) continue;
+    for (const [la, lo, t, mins] of p.tinfo.stops) {
+      if (named.some(q => q.time === t && gdist([q.lat, q.lon], [la, lo]) < 80)) continue;      // уже подписана
+      const m = L.circleMarker([la, lo], { radius: Math.min(13, 5 + mins / 8), color: '#fff', weight: 2, fillColor: '#56677D', fillOpacity: .55 }).addTo(stopLayer);
+      m.bindTooltip(`Остановка ${t} · ${mins} мин${p.day ? ` · день ${p.day}` : ''}`, { className: 'tt' });
+      m.bindPopup(`<div class="stoppop"><b>${t}, ${mins} мин</b><div class="hint">Что здесь было?</div><div class="chips">${[['halt', 'привал'], ['halt', 'обед'], ['ford', 'брод'], ['pass', 'перевал'], ['sight', 'достопримечательность'], ['mark', 'другое']].map(([k, n]) =>
+        `<button class="chip" data-a="stoppt" data-k="${k}" data-n="${n}" data-t="${t}" data-m="${mins}" data-lat="${la}" data-lon="${lo}" data-day="${p.day || ''}">${n}</button>`).join('')}</div></div>`, { className: 'stop-pop' });
+    }
+  }
+}
 function fitAll() {
   const pts = P().pieces.filter(p => p.role !== 'skip').flatMap(p => p.pts.map(q => [q[0], q[1]]));
   const all = pts.length ? pts : P().points.map(q => [q.lat, q.lon]);
@@ -1287,6 +1320,13 @@ const A = {
   view(el, ev) { if (ev.target.closest('[data-stop]')) return; lightbox(+el.dataset.i); },
 };
 A.mkvarauto = () => mkVarsAuto(daysModel().loose.map(p => p.id));
+A.stoppt = el => {
+  const d = el.dataset, obj = S.obj.includes(d.k);
+  const q = { id: Math.random().toString(16).slice(2, 10), type: d.k, name: d.k === 'mark' || d.k === 'pass' || d.k === 'ford' || d.k === 'sight' ? '' : d.n, lat: +d.lat, lon: +d.lon,
+    on_map: true, on_profile: obj, nights: 1, time: d.t, note: `остановка ${d.t}, ${d.m} мин` };
+  P().points.push(q); map && map.closePopup(); S.selPoint = q.id; S.ptab = obj ? 'obst' : 'points'; S.filter = 'all'; S.q = '';
+  dirty(); if (S.step !== 'points') go(`#/p/${S.pid}/points`); else { paintPanel(); drawMap(); scrollToPoint(); }
+};
 A.importas = el => { S.importAs = el.dataset.v; paintPanel(); };
 A.mkvars = el => { const ids = daysModel().loose.map(p => p.id); return varOp({ action: 'make', pieces: ids, kind: el.dataset.k }, 'Делаю варианты…'); };
 A.vkind = el => { const v = (P().variants || []).find(x => x.id === el.dataset.id); if (!v) return; v.kind = el.dataset.v; P().pieces.forEach(p => { if (p.var === v.id) p.role = v.kind; }); dirty(); paintPanel(); drawPieces(); };
@@ -1303,6 +1343,7 @@ A.pmode = el => { P().meta.mode = el.dataset.v; dirty(); paintPanel(); };
 A.pshape = el => { const p = pieceById(el.dataset.id), v = el.dataset.v; if (v === radAuto(p)) delete p.shape; else p.shape = v; dirty(); paintPanel(); drawPieces(); };
 A.ponce = el => { const p = pieceById(el.dataset.id), v = el.dataset.v === '1'; if (v === (P().meta.radial_one_way !== false)) delete p.once; else p.once = v; dirty(); paintPanel(); };
 const C = {
+  tz(el) { P().meta.tz = +el.value; dirty(); toast('Пояс сменится во времени после сохранения — обнови страницу через пару секунд'); },
   vtitle(el) { const v = (P().variants || []).find(x => x.id === el.dataset.id); if (v) { v.title = el.value; dirty(); } },
   vnote(el) { const v = (P().variants || []).find(x => x.id === el.dataset.id); if (v) { v.note = el.value; dirty(); } },
   vjoin(el) { if (el.value) varOp({ action: 'join', var: el.dataset.id, into: el.value }); },

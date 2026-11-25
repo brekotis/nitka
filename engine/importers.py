@@ -326,13 +326,15 @@ def _natkey(s):
 
 
 # ---------------------------------------------------------------- упрощение плотных GPS-треков
-def simplify(pts, tol_m=3.0):
-    """Дуглас–Пекер; точки (lat, lon, ele, time)."""
+def simplify(pts, tol_m=3.0, keep_idx=()):
+    """Дуглас–Пекер; точки (lat, lon, ele, time). keep_idx — точки, которые остаются всегда (начало и конец остановок)."""
     n = len(pts)
     if n < 300: return list(pts)
     k = math.cos(math.radians(pts[0][0])); mx = 111320 * k; my = 110540
     X = [(p[1] * mx, p[0] * my) for p in pts]
     keep = [False] * n; keep[0] = keep[-1] = True
+    for i in keep_idx:
+        if 0 <= i < n: keep[i] = True
     stack = [(0, n - 1)]
     while stack:
         a, b = stack.pop()

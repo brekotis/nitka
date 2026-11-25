@@ -6,7 +6,7 @@ Trip(project) — всё, что раньше было зашито в kdata.py 
 import math
 from datetime import date, timedelta
 from . import dem
-from .classify import TYPE, OBJ_TYPES, GRADES, GRADE_COL, BAND, dist
+from .classify import TYPE, OBJ_TYPES, GRADES, GRADE_COL, BAND, dist, piece_times, time_info, trip_tz, hm, dur
 
 STEP = 25.0        # шаг выборки по нитке, м
 DENSE_M = 80.0     # медианный шаг трека, до которого его высотам верим (записанный GPS-трек); реже — нарисованный маршрут
@@ -302,6 +302,24 @@ class Trip:
                                    x0=P['x'][i], x1=P['x'][j], km=P['c'][j] - P['c'][i]))
         self.BANDS.sort(key=lambda b: (b['day'], b['x0']))
         self._variants(proj)
+        # время по дням — у кусков, записанных с временем (часы, навигатор)
+        self.TIMES = {}
+        for p in sorted(proj.get('pieces', []), key=lambda p: p.get('order', 0)):
+            if p.get('role') in ('main', 'radial') and p.get('day') and int(p['day']) in self.DAYS:
+                ts = piece_times(p)
+                if ts:
+                    ti = time_info(p['pts'], ts)
+                    if ti: self.TIMES.setdefault(int(p['day']), []).append(ti)
+        allp = self.all_pts()
+        self.tz = trip_tz(proj, allp[0][1] if allp else None)
+
+    def day_time(self, d):
+        """Выход, приход, чистое ходовое время и привалы дня (по всем его кускам с временем)."""
+        T = self.TIMES.get(d)
+        if not T: return None
+        a = min(t['start'] for t in T); b = max(t['end'] for t in T); move = sum(t['move'] for t in T)
+        stops = [s for t in T for s in t['stops']]
+        return dict(start=a, end=b, move=move, stops=stops, pause=sum(s[3] - s[2] for s in stops))
 
     # ---------------------------------------------------------------- запасные варианты и аварийные выходы
     def _variants(self, proj):
@@ -574,6 +592,8 @@ class Trip:
         return dict(
             km=round(t['L'], 1), up=int(round(t['up'])), dn=int(round(t['dn'])), kcoef=self.kcoef, period=self.period(), elev=self.elev_source(),
             days=[dict(n=d, date=self.date(d), km=round(self.profile(d)['L'], 1), up=int(round(self.profile(d)['up'])), dn=int(round(self.profile(d)['dn'])),
+                       **({} if not self.day_time(d) else dict(t_start=hm(self.day_time(d)['start'], self.tz), t_end=hm(self.day_time(d)['end'], self.tz),
+                          move=dur(self.day_time(d)['move']), n_stops=len(self.day_time(d)['stops']), pause=dur(self.day_time(d)['pause']))),
                        zmin=int(self.profile(d)['zmin']), zmax=int(self.profile(d)['zmax']), radial=bool(self.DAYS[d]['rad']),
                        objects=[self.obj_label(self.OBJ[m['oi']]) for m in self.profile(d)['marks'] if m.get('oi') is not None and m['first']],
                        key_objects=[self.obj_label(self.OBJ[m['oi']]) for m in self.profile(d)['marks'] if m.get('oi') is not None and m['first'] and self.OBJ[m['oi']]['key']]) for d in self.DAYS],
@@ -584,4 +604,5 @@ class Trip:
             bands=[dict(day=b['day'], title=b['title'], km=round(b['km'], 1)) for b in self.BANDS],
             variants=[dict(lab=V['lab'], kind=V['kind'], title=V['title'], note=V['note'], route=self.var_route(V), km=round(V['km'], 1),
                            up=int(round(V['up'])), dn=int(round(V['dn'])), objects=V['objects']) for V in self.VARS],
-            plan=self.plan)
+            plan=self.plan, tz=self.tz,
+            move=dur(sum(self.day_time(d)['move'] for d in self.DAYS if self.day_time(d))) if self.TIMES else None)

@@ -130,10 +130,20 @@ def save_project(pid, uid, proj, create=False):
     else: c.execute('UPDATE projects SET title=?, json=?, card=?, updated=? WHERE id=? AND user_id=?', (proj['meta']['title'], js, card, now, pid, uid))
     c.commit()
 
+def _local_date(ts, tz):
+    return time.strftime('%Y-%m-%d', time.gmtime(ts + tz * 3600))
+
 def for_client(proj):
     """Проект для браузера: у кусков — что «Нитка» видит в них как в радиалке (форма и км). В базу это не пишется."""
     out = dict(proj); pcs = []
+    tz = classify.trip_tz(proj, next((p['pts'][0][1] for p in proj.get('pieces', []) if p.get('pts')), None))
     for p in proj.get('pieces', []):
+        ts = classify.piece_times(p)
+        if 'tm' in p or 't0' in p: p = {k: v for k, v in p.items() if k not in ('tm', 't0')}
+        if ts:
+            ti = classify.time_info(p['pts'], ts)
+            if ti: p = dict(p, tinfo=dict(start=classify.hm(ti['start'], tz), end=classify.hm(ti['end'], tz), move=ti['move'], date=_local_date(ti['start'], tz),
+                                       stops=[[la, lo, classify.hm(a, tz), round((b - a) / 60)] for la, lo, a, b in ti['stops']]))
         if p.get('role') == 'radial' or (p.get('role') == 'main' and len(p.get('pts', [])) > 2):
             try:
                 r = [(q[0], q[1]) for q in p['pts']]
@@ -187,7 +197,10 @@ def merge_client(stored, incoming):
         try: meta['kcoef'] = min(3.0, max(1.0, float(im['kcoef'])))
         except Exception: pass
     if 'radial_one_way' in im: meta['radial_one_way'] = bool(im['radial_one_way'])
-    if 'no_passes' in im: meta['no_passes'] = bool(im['no_passes'])      # по каталогу перевалов уже искали — у нитки ничего нет
+    if 'no_passes' in im: meta['no_passes'] = bool(im['no_passes'])
+    if 'tz' in im:
+        try: meta['tz'] = max(-12.0, min(14.0, float(im['tz']))) if im['tz'] not in (None, '') else None
+        except (TypeError, ValueError): pass      # по каталогу перевалов уже искали — у нитки ничего нет
     if im.get('elev') in ('auto', 'dem', 'track'): meta['elev'] = im['elev']
     sheets = dict(stored.get('sheets', {}))
     for k, v in (incoming.get('sheets') or {}).items():
@@ -544,7 +557,9 @@ class H(BaseHTTPRequestHandler):
                 if not any(L['segs'] or L['wpts'] for L in layers): raise Err(400, f'В «{name}» не нашлось ни треков, ни точек.')
                 if sum(len(s) for L in layers for s in L['segs']) > 1500000: raise Err(400, 'Слишком большой трек.')
                 as_role = q.get('as') if q.get('as') in classify.VAR_ROLES else 'main'      # «Что загружаю»: основной маршрут или вариант
-                info = classify.merge_import(proj, layers, name, as_role)
+                try: tzq = float(q['tz']) if 'tz' in q else None      # пояс браузера: им считается время, если у похода его ещё нет
+                except ValueError: tzq = None
+                info = classify.merge_import(proj, layers, name, as_role, tzq)
                 save_project(pid, uid, proj)
                 return self.send(200, dict(project=for_client(proj), info=info))
             if sub == 'variants' and m == 'POST':      # варианты маршрута: сделать из кусков, нарисовать, объединить, отделить

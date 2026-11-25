@@ -302,18 +302,131 @@ def cut_piece(proj, pid, lat, lon):
     if length_km(first) < 0.03 or length_km(second) < 0.03 or len(first) < 2 or len(second) < 2:
         return dict(ok=False, msg='Слишком близко к концу куска — резать тут нечего. Нажми подальше от края.')
     base = re.sub(r'\s*\((начало|продолжение)\)$', '', p['name'])
+    ts = piece_times(p); tf = ts2 = None
+    if ts:                                    # время делится вместе с точками
+        tmid = ts[i] + (ts[i + 1] - ts[i]) * t
+        tf = ts[:i + 1] + ([tmid] if t > 1e-6 else []); ts2 = ([tmid] if t < 1 - 1e-6 else []) + ts[i + 1:]
+        if t <= 1e-6: ts2 = ts[i:]
+        if t >= 1 - 1e-6: tf = ts[:i + 2]
     new = dict(p, id=uid(), name=base + ' (продолжение)', pts=second, km=round(length_km(second), 2), order=p.get('order', 0) + 0.5)
     p.update(name=base + ' (начало)' if not p['name'].endswith('(продолжение)') else p['name'], pts=first, km=round(length_km(first), 2))
+    set_times(p, tf); set_times(new, ts2)
     proj['pieces'].append(new)
     for n, x in enumerate(sorted(proj['pieces'], key=lambda x: x.get('order', 0))): x['order'] = n
     return dict(ok=True, new=new['id'], msg='Нитка разрезана: теперь это два куска. Поставь им дни, если нужно.')
 
+
+# ---------------------------------------------------------------- время в треке: остановки, «звёздочки», ходовое время
+STOP_R, STOP_T = 40.0, 300          # остановка: дольше 5 минут в круге 40 м
+
+def piece_times(p):
+    """Время каждой точки куска (секунды UTC) или None, если трек без времени."""
+    tm = p.get('tm')
+    if not tm or len(tm) != len(p.get('pts', [])): return None
+    t0 = p.get('t0') or 0
+    return [t0 + d for d in tm]
+
+def set_times(p, ts):
+    if not ts or len(ts) != len(p.get('pts', [])) or any(t is None for t in ts): p.pop('tm', None); p.pop('t0', None); return
+    t0 = int(ts[0]); p['t0'] = t0; p['tm'] = [int(round(t - t0)) for t in ts]
+
+def _fill_times(ts):
+    """Пропуски во времени — по соседям (линейно по номеру точки)."""
+    idx = [i for i, t in enumerate(ts) if t]
+    if len(idx) < max(2, 0.9 * len(ts)): return None
+    out = list(ts)
+    for i in range(len(out)):
+        if out[i]: continue
+        a = max((k for k in idx if k < i), default=None); b = min((k for k in idx if k > i), default=None)
+        out[i] = out[a] if b is None else out[b] if a is None else out[a] + (out[b] - out[a]) * (i - a) / (b - a)
+    return out
+
+def collapse_stops(seg):
+    """«Звёздочки»: пока группа стоит, часы пишут точки вокруг одного места — это лишние сотни метров пути.
+    Остановка (дольше 5 минут в круге 40 м) заменяется двумя точками в её центре — начало и конец, по ним видно её время.
+    Возвращает (новые точки, номера точек, которые нельзя выкинуть при прореживании, сколько метров убрано, остановок)."""
+    out, keep = [], []; removed = 0.0; n = len(seg); i = 0; stops = 0
+    while i < n:
+        j = i
+        while j + 1 < n and dist(seg[i][:2], seg[j + 1][:2]) < STOP_R: j += 1
+        if j > i and seg[i][3] and seg[j][3] and seg[j][3] - seg[i][3] >= STOP_T:
+            grp = seg[i:j + 1]; la = sum(q[0] for q in grp) / len(grp); lo = sum(q[1] for q in grp) / len(grp)
+            el = [q[2] for q in grp if q[2] is not None]; e = sum(el) / len(el) if el else None
+            removed += sum(dist(seg[k][:2], seg[k + 1][:2]) for k in range(i, j))
+            if out: removed += dist(out[-1][:2], (la, lo)) - dist(out[-1][:2], seg[i][:2])
+            keep += [len(out), len(out) + 1]; stops += 1
+            out.append((la, lo, e, seg[i][3])); out.append((la, lo, e, seg[j][3]))
+            i = j + 1
+        else:
+            out.append(seg[i]); i += 1
+    return out, keep, max(0.0, removed), stops
+
+def time_info(pts, ts):
+    """Время куска: начало и конец движения, ходовое время, остановки [(lat, lon, начало, конец)].
+    Остановка в самом начале или конце куска — это ночёвка, а не привал: время выхода и прихода считается без неё."""
+    if not ts or len(ts) != len(pts) or len(pts) < 2: return None
+    stops = []; i = 0; n = len(pts)
+    while i < n:
+        j = i
+        while j + 1 < n and dist(pts[i][:2], pts[j + 1][:2]) < STOP_R: j += 1
+        if j > i and ts[j] - ts[i] >= STOP_T: stops.append([i, j]); i = j
+        i += 1
+    a, b = ts[0], ts[-1]
+    if stops and stops[0][0] == 0: a = ts[stops[0][1]]; stops = stops[1:]
+    if stops and stops[-1][1] == n - 1: b = ts[stops[-1][0]]; stops = stops[:-1]
+    pause = sum(ts[j] - ts[i] for i, j in stops)
+    return dict(start=a, end=b, move=max(0, b - a - pause),
+                stops=[(round(pts[i][0], 6), round(pts[i][1], 6), ts[i], ts[j]) for i, j in stops])
+
+def trip_tz(proj, lon=None):
+    """Часовой пояс похода, часы: выбранный туристом, иначе — по долготе."""
+    tz = proj.get('meta', {}).get('tz')
+    if isinstance(tz, (int, float)) and -12 <= tz <= 14: return tz
+    return _tz_hours(lon) if lon is not None else 3
+
+def hm(ts, tz):
+    """«9:42» — местное время."""
+    t = datetime.fromtimestamp(ts + tz * 3600, timezone.utc); return f'{t.hour}:{t.minute:02d}'
+
+def dur(sec):
+    """«3:55» — часы и минуты."""
+    m = int(round(sec / 60)); return f'{m // 60}:{m % 60:02d}'
+
+def _cells(pts, k):
+    """Ячейки ~37 м с соседями — быстро понять, лежит ли точка на другой линии."""
+    s = set()
+    for q in pts:
+        y, x = int(round(q[0] * 3000)), int(round(q[1] * 3000 * k))
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1): s.add((y + dy, x + dx))
+    return s
+
+def _share_on(a, cells, k):
+    smp = a[::max(1, len(a) // 80)]
+    return sum(1 for q in smp if (int(round(q[0] * 3000)), int(round(q[1] * 3000 * k))) in cells) / max(1, len(smp))
+
+def upgrade_times(proj, pts, ts):
+    """Трек с временем загружен повторно: куски, загруженные раньше без времени, получают его, а дни, роли, названия
+    и правки остаются. Кусок раньше мог быть разрезан — тогда каждой части достаётся её отрезок. Возвращает число кусков."""
+    if not ts or len(pts) < 2: return 0
+    k = math.cos(math.radians(pts[0][0])); new_cells = _cells(pts, k); got = 0
+    for p in proj['pieces']:
+        if p.get('tm') or len(p.get('pts', [])) < 2 or p.get('role') == 'skip': continue
+        if _share_on(p['pts'], new_cells, k) < 0.85: continue
+        i0 = min(range(len(pts)), key=lambda i: dist(pts[i][:2], p['pts'][0][:2]))
+        i1 = min(range(len(pts)), key=lambda i: dist(pts[i][:2], p['pts'][-1][:2]))
+        if i1 - i0 < 1: continue
+        sub = pts[i0:i1 + 1]; L_old, L_new = length_km(p['pts']), length_km(sub)
+        if L_old > 0.05 and not (0.3 < L_new / L_old < 2.0): continue      # старый кусок мог быть длиннее из-за «звёздочек»
+        p['pts'] = sub; set_times(p, ts[i0:i1 + 1]); p['km'] = round(L_new, 2); got += 1
+    return got
+
 def _tz_hours(lon): return int(round(lon / 15.0))
 
-def _split_by_date(seg):
+def _split_by_date(seg, tzh=None):
     """Кусок GPS-трека с отметками времени — по местным суткам."""
     if not seg or sum(1 for p in seg if p[3]) < len(seg) * 0.9: return None
-    tz = timezone(timedelta(hours=_tz_hours(seg[0][1])))
+    tz = timezone(timedelta(hours=tzh if tzh is not None else _tz_hours(seg[0][1])))
     out = {}
     last = None
     for p in seg:
@@ -322,23 +435,33 @@ def _split_by_date(seg):
         out.setdefault(d, []).append(p); last = d
     return out if len(out) > 1 or out else None
 
-def _pts_out(seg):
+def _pts_out(seg, stat=None):
+    """Точки куска для хранения и их время (или None). stat — сюда пишется, сколько «звёздочек» убрано."""
+    timed = sum(1 for p in seg if p[3]) >= 0.9 * len(seg)
+    keep = []
+    if timed:
+        seg, keep, removed, nstops = collapse_stops(seg)
+        if stat is not None: stat['removed'] = stat.get('removed', 0.0) + removed; stat['stops'] = stat.get('stops', 0) + nstops
     # упрощаются только записанные GPS-треки (густые, с временем); нарисованная вручную нитка остаётся как есть
-    if len(seg) > 2500 or sum(1 for p in seg if p[3]) > len(seg) * 0.5: seg = simplify(seg, 2.0)
+    if len(seg) > 2500 or sum(1 for p in seg if p[3]) > len(seg) * 0.5: seg = simplify(seg, 2.0, keep)
+    ts = _fill_times([p[3] for p in seg]) if timed else None
     has_ele = sum(1 for p in seg if p[2] is not None) >= len(seg) * 0.9
     if has_ele:
         last = next(p[2] for p in seg if p[2] is not None); out = []
         for p in seg:
             if p[2] is not None: last = p[2]
             out.append([round(p[0], 6), round(p[1], 6), round(last, 1)])
-        return out
-    return [[round(p[0], 6), round(p[1], 6)] for p in seg]
+        return out, ts
+    return [[round(p[0], 6), round(p[1], 6)] for p in seg], ts
 
-def merge_import(proj, layers, src_name, as_role='main'):
+def merge_import(proj, layers, src_name, as_role='main', tz=None):
     """Добавляет слои в проект. as_role: main — как обычно (варианты узнаются по названию), alt / exit — всё из этой
     загрузки — запасной вариант или аварийный выход. Возвращает сводку: что нашлось."""
     meta = proj['meta']
     meta.pop('no_passes', None)      # нитка меняется — перевалы по каталогу стоит поискать заново
+    has_time = any(sum(1 for q in s if q[3]) >= 0.9 * len(s) for L in layers for s in L['segs'] if s)
+    if has_time and not isinstance(meta.get('tz'), (int, float)) and isinstance(tz, (int, float)) and -12 <= tz <= 14: meta['tz'] = tz      # пояс браузера туриста
+    tzh = meta.get('tz') if isinstance(meta.get('tz'), (int, float)) else None
     sid = uid()
     # год: из start_date, из названий точек, из времени GPS, иначе текущий
     year = int(meta['start_date'][:4]) if meta.get('start_date') else None
@@ -364,7 +487,7 @@ def merge_import(proj, layers, src_name, as_role='main'):
             name = (L['name'] or 'трек').strip()
             hint = piece_hint(name, year)
             # время в самом треке надёжнее голого числа в названии («15 activity_…» — это 15-е число, а не 15-й день)
-            parts = _split_by_date(seg) if (not hint or hint[0] == 'lead') else None
+            parts = _split_by_date(seg, tzh) if (not hint or hint[0] == 'lead') else None
             if parts and len(parts) > 1:
                 for d, s in sorted(parts.items()):
                     if len(s) > 1: new_pieces.append(dict(name=f'{name} · {d:%d.%m}', seg=s, hint=('date', d)))
@@ -412,7 +535,7 @@ def merge_import(proj, layers, src_name, as_role='main'):
             delta = 1 - (lo - meta['lead_base']); shift_days(delta); meta['lead_base'] -= delta
             if start: start = start - timedelta(days=delta); meta['start_date'] = start.isoformat()
     order0 = len(proj['pieces'])
-    n_assigned = 0; var_pieces = []
+    n_assigned = 0; var_pieces = []; stat = {}; upgraded = 0
     for i, p in enumerate(new_pieces):
         day = None
         if p['hint']:
@@ -420,15 +543,19 @@ def merge_import(proj, layers, src_name, as_role='main'):
             elif p['hint'][0] == 'lead': day = p['lead'] - meta['lead_base']
             elif start: day = (p['hint'][1] - start).days + 1
             if day is not None and day < 1: day = None
-        pts = _pts_out(p['seg'])
+        pts, ts = _pts_out(p['seg'], stat)
+        if ts and not p['skip']:
+            got = upgrade_times(proj, pts, ts)
+            if got: upgraded += got; continue          # этот трек уже был в походе — ему просто добавилось время
         vk = as_role if as_role in VAR_ROLES else (None if (day or p['skip']) else variant_kind(p.get('base') or p['name']))
         if vk:                                # запасной вариант или аварийный выход — в варианты после разбора всех кусков
             x = dict(id=uid(), src=sid, name=p['name'], pts=pts, day=None, role=vk, order=order0 + i, km=round(length_km(pts), 2))
-            proj['pieces'].append(x); var_pieces.append((vk, x))
+            set_times(x, ts); proj['pieces'].append(x); var_pieces.append((vk, x))
             continue
         role = 'skip' if p['skip'] else ('radial' if is_radial_name(p['name']) else 'main')
         if day: n_assigned += 1
-        proj['pieces'].append(dict(id=uid(), src=sid, name=p['name'], pts=pts, day=day, role=role, order=order0 + i, km=round(length_km(pts), 2)))
+        x = dict(id=uid(), src=sid, name=p['name'], pts=pts, day=day, role=role, order=order0 + i, km=round(length_km(pts), 2))
+        set_times(x, ts); proj['pieces'].append(x)
 
     var_made = [v for kind in VAR_ROLES for v in group_variants(proj, [x for k, x in var_pieces if k == kind], kind)]
 
@@ -458,6 +585,8 @@ def merge_import(proj, layers, src_name, as_role='main'):
     proj['sources'].append(dict(id=sid, name=src_name, pieces=len(new_pieces), points=sum(counts.values())))
     return dict(source=sid, pieces=len(new_pieces), assigned=n_assigned, skipped=sum(1 for p in new_pieces if p['skip']), points=counts,
                 variants=[dict(kind=v['kind'], title=v['title']) for v in var_made],
+                timed=sum(1 for x in proj['pieces'] if x.get('src') == sid and x.get('tm')), upgraded=upgraded,
+                stops=stat.get('stops', 0), stars_km=round(stat.get('removed', 0.0) / 1000, 2),
                 unassigned=sum(1 for p in proj['pieces'] if not p.get('day') and p['role'] in ('main', 'radial')))
 
 def chain_order(proj, days=None):
@@ -495,6 +624,7 @@ def split_by_camps(proj):
     if not loose: return dict(ok=False, msg='Все треки уже разложены по дням.')
     if not camps: return dict(ok=False, msg='Нет ночёвок с датами — отметьте ночёвки (тип «Ночёвка», дата) и повторите.')
     chain = [q for p in loose for q in p['pts']]
+    tl = [piece_times(p) for p in loose]; tchain = [t for x in tl for t in x] if all(tl) else None
     meta = proj['meta']
     first = date.fromisoformat(camps[0]['date'])
     start = date.fromisoformat(meta['start_date']) if meta.get('start_date') else first
@@ -511,14 +641,17 @@ def split_by_camps(proj):
     if not cuts: return dict(ok=False, msg='Ночёвки лежат далеко от нитки (дальше 600 м) — разрезать не получилось.')
     keep = [p for p in proj['pieces'] if p not in loose]
     src = loose[0].get('src'); a = 0; order = min(p['order'] for p in loose); made = 0
-    def add(pts, day):
+    def add(i0, i1, day):
         nonlocal order, made
+        pts = chain[i0:i1]
         if len(pts) < 2: return
-        keep.append(dict(id=uid(), src=src, name=f'день {day}', pts=pts, day=day, role='main', order=order, km=round(length_km(pts), 2))); order += 1; made += 1
+        x = dict(id=uid(), src=src, name=f'день {day}', pts=pts, day=day, role='main', order=order, km=round(length_km(pts), 2))
+        if tchain: set_times(x, tchain[i0:i1])
+        keep.append(x); order += 1; made += 1
     for i, c in cuts:
         day = (date.fromisoformat(c['date']) - start).days + 1
-        add(chain[a:i + 1], max(1, day)); a = i
+        add(a, i + 1, max(1, day)); a = i
     last = cuts[-1][1]
-    add(chain[a:], (date.fromisoformat(last['date']) - start).days + 1 + (last.get('nights') or 1))
+    add(a, len(chain), (date.fromisoformat(last['date']) - start).days + 1 + (last.get('nights') or 1))
     proj['pieces'] = keep
     return dict(ok=True, msg=f'Нитка разрезана на {made} дн. по {len(cuts)} ночёвкам.')
