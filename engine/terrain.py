@@ -165,9 +165,10 @@ def crosses(G, E, D, i, win=350.0, drop=80.0):
     return min(E[lo:i + 1] + [E[a]]) < top - drop and min(E[i:hi + 1] + [E[b]]) < top - drop and a < i < b
 
 
-def trail_leg(a, b, kind='', approach=250.0, avoid=()):
+def trail_leg(a, b, kind='', approach=250.0, avoid=(), tol=0):
     """Отрезок по тропам (BRouter), а где тропа не доходит до точки — подход по рельефу (к перевалу от последней тропы).
     Тропы нет вовсе или BRouter уводит в обход через полрайона — весь отрезок по рельефу.
+    tol — точка «примерно»: если тропа проходит не дальше tol метров от неё, нитка остаётся на тропе и к точке не сворачивает.
     → (точки, ok — нашлась ли тропа, 'trail' | 'terrain', maxdeg)"""
     from . import trackfix
     st = dist(a, b)
@@ -181,10 +182,12 @@ def trail_leg(a, b, kind='', approach=250.0, avoid=()):
         if tp: return tp, False, 'terrain', info['maxdeg']
         return [list(a), list(b)], False, 'line', max_slope([list(a), list(b)])
     out = [list(q) for q in pts]
-    if dist(a, out[0]) > approach:
+    if dist(a, out[0]) <= tol: pass      # точка «примерно» — нитка начинается на тропе
+    elif dist(a, out[0]) > approach:
         tp, _ = path(a, out[0], avoid=near); out = (tp[:-1] if tp else [list(a)]) + out
     else: out[0] = list(a)
-    if dist(out[-1], b) > approach:
+    if dist(out[-1], b) <= tol: pass
+    elif dist(out[-1], b) > approach:
         tp, _ = path(out[-1], b, avoid=near); out = out + (tp[1:] if tp else [list(b)])
     else: out[-1] = list(b)
     return out, True, 'trail', None

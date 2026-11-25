@@ -414,7 +414,7 @@ async function openProject(pid, step) {
   await flush();
   try {
     const d = await api('GET', `/api/projects/${pid}${S.share ? '?' + sq() : ''}`, undefined, false, 'Открываю поход…');
-    S.pid = pid; S.proj = d.project; S.build = d.build; S.step = step; S.rev = d.rev; S.role = d.role; S.owner = d.owner; S.shared = d.shared; S.hist = null; S.selPiece = S.selPoint = null; S.filter = 'all'; S.folder = ''; S.q = ''; S.lastInfo = null; S.mode = null; S.selBand = null; S.bandA = null; S.ptab = 'points';
+    S.pid = pid; S.proj = d.project; S.build = d.build; S.step = step; S.rev = d.rev; S.role = d.role; S.owner = d.owner; S.shared = d.shared; S.hist = null; S.planDraft = !!d.plan_draft; S.selPiece = S.selPoint = null; S.filter = 'all'; S.folder = ''; S.q = ''; S.lastInfo = null; S.mode = null; S.selBand = null; S.bandA = null; S.ptab = 'points';
     if (!S.proj.pieces.length) S.step = 'tracks';
     destroyAtlas(); renderEditor();
     if (['running', 'queued'].includes(S.build.state)) startPoll();
@@ -680,7 +680,7 @@ async function plannerMod() {
   PLN = m.createPlanner({ L, getMap: () => map, api, toast, esc, confirmBox, sym, gcol: () => S.gcol || {}, pid: () => S.pid, proj: () => S.proj,
     repaint: planRepaint,
     onDone: r => { S.proj = r.project; S.lastInfo = null; go(`#/p/${S.pid}/days`); setTimeout(() => drawMap(true), 50); },
-    onClose: () => { S.planner = false; S.mode = null; hintOff(); if (S.mapTemp) { S.mapTemp = null; applyMapSize(); } paintEditor(); } });
+    onClose: keep => { S.planner = false; S.mode = null; S.planDraft = !!keep; hintOff(); if (S.mapTemp) { S.mapTemp = null; applyMapSize(); } paintEditor(); } });
   return PLN;
 }
 async function openPlanner() {
@@ -690,7 +690,7 @@ async function openPlanner() {
   if (S.step === 'maps') { S.step = 'tracks'; history.replaceState(null, '', `#/p/${S.pid}/tracks`); }
   S.planner = true; S.mode = 'plan'; paintEditor();
   if (isPhone() && mapSize() !== 'big') { S.mapTemp = 'big'; applyMapSize(); }
-  p.open(); drawPieces();
+  await p.open(); drawPieces();
 }
 async function openEditor(pieceId, opts) {
   if (!map) return toast('Карта ещё не открылась', true);
@@ -906,8 +906,10 @@ function stepTracks() {
   const pr = P(); const has = pr.pieces.length > 0; const i = S.lastInfo;
   const planned = !!(pr.plan && pr.plan.pts && pr.plan.pts.length);
   return `<h2>Треки</h2><p>Загрузи нитку маршрута — одним файлом, по дням или ссылкой. Ночёвки, перевалы и другие точки подтянутся вместе с ней.</p>
-    <div class="plancta${has && !planned ? ' small' : ''}"><div><b>${planned ? 'Маршрут нарисован в планировщике' : 'Трека ещё нет? Нарисуй маршрут'}</b><div class="hint">${planned ? 'Поменять точки, ночёвки, перевалы — там же; дни пересоберутся сами.' : 'По ключевым точкам — по тропам или напрямую, с перевалами из каталога. Километры и набор — сразу.'}</div></div>
-      <button class="btn ${has && !planned ? '' : 'go'}" data-a="plan">✎ ${planned ? 'Изменить маршрут' : 'Нарисовать маршрут'}</button></div>
+    ${S.planDraft ? `<div class="plancta"><div><b>Есть черновик маршрута</b><div class="hint">Нарисованное сохранилось — продолжай с того же места, с любого устройства. В поход оно попадёт по «Готово».</div></div>
+      <button class="btn go" data-a="plan">✎ Продолжить черновик</button></div>`
+    : `<div class="plancta${has && !planned ? ' small' : ''}"><div><b>${planned ? 'Маршрут нарисован в планировщике' : 'Трека ещё нет? Нарисуй маршрут'}</b><div class="hint">${planned ? 'Поменять точки, ночёвки, перевалы — там же; дни пересоберутся сами.' : 'По ключевым точкам — по тропам или напрямую, с перевалами из каталога. Километры и набор — сразу.'}</div></div>
+      <button class="btn ${has && !planned ? '' : 'go'}" data-a="plan">✎ ${planned ? 'Изменить маршрут' : 'Нарисовать маршрут'}</button></div>`}
     ${i ? `<div class="banner ok"><div><b>Нашёл:</b> ${esc(infoText(i))}.</div><div class="hint">${i.assigned === i.pieces - i.skipped ? 'Все треки разложились по дням сами.' : (i.unassigned ? `По дням не разложились: ${i.unassigned}. Это правится на шаге «Дни».` : '')}${i.skipped ? ` Дубли (${i.skipped}) отложены в сторону.` : ''}</div></div>` : ''}
     <div class="field"><span>Что загружаю</span><div class="seg sm even">${[['main', 'Основной', 'Основной маршрут'], ['alt', 'Запасной', 'Запасной вариант'], ['exit', 'Аварийный', 'Аварийный выход']].map(([v, t, title]) => `<button class="${(S.importAs || 'main') === v ? 'on' : ''}" data-a="importas" data-v="${v}" title="${title}">${t}</button>`).join('')}</div>
       <div class="hint">${(S.importAs || 'main') === 'main' ? 'Запасные и аварийные треки «Нитка» узнаёт и сама — по словам «запасной», «вариант», «обход», «аварийный», «сход» в названии.' : `Всё из следующей загрузки станет ${S.importAs === 'alt' ? 'запасным вариантом' : 'аварийным выходом'} — файл или ссылка nakarte.`}</div></div>

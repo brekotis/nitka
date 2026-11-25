@@ -57,6 +57,7 @@ def init_db():
       CREATE INDEX IF NOT EXISTS members_user ON members(user_id);
       CREATE TABLE IF NOT EXISTS shares(token TEXT PRIMARY KEY, project_id TEXT, role TEXT, created REAL);
       CREATE INDEX IF NOT EXISTS shares_project ON shares(project_id);
+      CREATE TABLE IF NOT EXISTS plan_drafts(project_id TEXT, user_id INTEGER, json TEXT, updated REAL, PRIMARY KEY(project_id, user_id));
       CREATE TABLE IF NOT EXISTS revisions(id INTEGER PRIMARY KEY, project_id TEXT, user_id INTEGER, ts REAL, t0 REAL, kind TEXT, what TEXT, km REAL, data BLOB);
       CREATE INDEX IF NOT EXISTS revisions_project ON revisions(project_id, id);
     ''')
@@ -768,13 +769,14 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, dict(id=pid))
         if len(a) >= 2 and a[0] == 'projects':
             pid = a[1]; sub = a[2] if len(a) > 2 else ''
-            need = ('view' if m in ('GET', 'HEAD') and sub not in ('share', 'history', 'route', 'route-gen') else 'owner' if sub == 'share' and m == 'POST'
+            need = ('view' if m in ('GET', 'HEAD') and sub not in ('share', 'history', 'route', 'route-gen', 'plan-draft') else 'owner' if sub == 'share' and m == 'POST'
                     else 'view' if (not sub and m == 'DELETE') or sub == 'copy' else 'edit')
             uid, proj, row = self.project(pid, need); role = self._role
             if not sub and m == 'GET':
                 shared = role != 'owner' or bool(db().execute('SELECT 1 FROM members WHERE project_id=? LIMIT 1', (pid,)).fetchone())
+                draft = bool(uid and db().execute('SELECT 1 FROM plan_drafts WHERE project_id=? AND user_id=?', (pid, uid)).fetchone())
                 return self.send(200, dict(project=for_client(proj), build=build_status(pid), updated=row['updated'], rev=self._rev, role=role,
-                                           owner=user_name(row['user_id']), shared=shared))
+                                           owner=user_name(row['user_id']), shared=shared, plan_draft=draft))
             if sub == 'rev' and m == 'GET':      # не поменял ли поход кто-то ещё (общий поход открыт у нескольких)
                 return self.send(200, dict(rev=self._rev, by=user_name(row['by']), mine=row['by'] == uid))
             if not sub and m == 'PUT':
@@ -791,7 +793,7 @@ class H(BaseHTTPRequestHandler):
                     db().execute('DELETE FROM members WHERE project_id=? AND user_id=?', (pid, uid)); db().commit()
                     return self.send(200, dict(ok=True, left=True))
                 c = db()
-                for t in ('projects', 'members', 'shares', 'revisions'): c.execute(f'DELETE FROM {t} WHERE {"id" if t == "projects" else "project_id"}=?', (pid,))
+                for t in ('projects', 'members', 'shares', 'revisions', 'plan_drafts'): c.execute(f'DELETE FROM {t} WHERE {"id" if t == "projects" else "project_id"}=?', (pid,))
                 c.commit()
                 if pid not in ACTIVE: shutil.rmtree(render_dir(pid), ignore_errors=True)
                 return self.send(200, dict(ok=True))
@@ -916,9 +918,28 @@ class H(BaseHTTPRequestHandler):
                 if not j or j['pid'] != pid: raise Err(404, 'Подбор не найден — запусти ещё раз.')
                 with GEN_LOCK: prog = dict(j.get('prog') or {})
                 return self.send(200, dict(state=j['state'], secs=int(time.time() - j['started']), prog=prog, **(j.get('result') or {})))
+            if sub == 'plan-draft':      # черновик маршрута в планировщике: сохраняется сам, у каждого свой, в журнал не идёт
+                c = db()
+                if m == 'GET':
+                    r_ = c.execute('SELECT json, updated FROM plan_drafts WHERE project_id=? AND user_id=?', (pid, uid)).fetchone()
+                    return self.send(200, dict(draft=json.loads(r_['json']) if r_ else None, updated=r_['updated'] if r_ else None))
+                if m == 'PUT':
+                    raw = self.body()
+                    if len(raw) > 4_000_000: raise Err(413, 'Черновик слишком большой.')
+                    try: d_ = json.loads(raw or b'{}').get('draft')
+                    except ValueError: raise Err(400, 'Не понял черновик.')
+                    if not isinstance(d_, dict) or not isinstance(d_.get('pts'), list): raise Err(400, 'Не понял черновик.')
+                    c.execute('INSERT INTO plan_drafts(project_id,user_id,json,updated) VALUES(?,?,?,?) ON CONFLICT(project_id,user_id) DO UPDATE SET json=excluded.json, updated=excluded.updated',
+                              (pid, uid, json.dumps(d_, ensure_ascii=False, separators=(',', ':')), time.time())); c.commit()
+                    return self.send(200, dict(ok=True, updated=time.time()))
+                if m == 'DELETE':
+                    c.execute('DELETE FROM plan_drafts WHERE project_id=? AND user_id=?', (pid, uid)); c.commit()
+                    return self.send(200, dict(ok=True))
             if sub == 'plan' and m == 'POST':      # маршрут из планировщика → куски по дням, ночёвки, перевалы
                 r = planner.apply(proj, self.json().get('plan') or {})
-                if r['ok']: self.save(pid, proj, why='маршрут из планировщика')
+                if r['ok']:
+                    self.save(pid, proj, why='маршрут из планировщика')
+                    db().execute('DELETE FROM plan_drafts WHERE project_id=? AND user_id=?', (pid, uid)); db().commit()      # черновик стал маршрутом
                 return self.send(200, dict(project=for_client(proj), **r))
             if sub == 'day-radial' and m == 'POST':      # весь день — радиальный выход (куски склеиваются в один)
                 try: day = int(self.json().get('day'))
@@ -946,8 +967,12 @@ class H(BaseHTTPRequestHandler):
                     pts, info = terrain.path(a, b)
                     return self.send(200, dict(ok=bool(pts), pts=pts or [], used='terrain', maxdeg=info and info['maxdeg'], msg='' if pts else 'Рельеф здесь не посчитался — соединю прямой.'))
                 if q.get('full') == '1':      # планировщик: тропа + подходы к ней по рельефу, без тропы — по рельефу
-                    pts, ok, used, deg = terrain.trail_leg(a, b, proj['meta'].get('kind') or '')
-                    return self.send(200, dict(ok=ok, pts=pts, used=used, maxdeg=deg, msg='' if ok else 'тропы нет — по рельефу'))
+                    try: tol = max(0, min(1000, int(q.get('tol') or 0)))
+                    except ValueError: tol = 0
+                    busy0 = trackfix.BUSY[0]
+                    pts, ok, used, deg = terrain.trail_leg(a, b, proj['meta'].get('kind') or '', tol=tol)
+                    busy = trackfix.BUSY[0] > busy0 and not ok      # BRouter не ответил — это не «тропы нет»
+                    return self.send(200, dict(ok=ok, pts=pts, used=used, maxdeg=deg, busy=busy, msg='' if ok else 'сервис троп занят — пока по рельефу, попробую ещё' if busy else 'тропы нет — по рельефу'))
                 pts = trackfix.route(a, b, proj['meta'].get('kind') or '')
                 return self.send(200, dict(ok=bool(pts), pts=pts or [], msg='' if pts else 'Тропу не нашёл — соединю прямой.'))
             if sub == 'export.gpx' and m == 'GET':      # чистый GPX с прореживанием

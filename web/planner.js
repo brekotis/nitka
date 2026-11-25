@@ -16,86 +16,116 @@ export function createPlanner(ctx) {
   const draftKey = () => 'nitkaPlan:' + ctx.pid();
 
   // ---------------------------------------------------------------- открыть / закрыть
-  function open() {
+  async function open() {
     const pr = ctx.proj(), map = getMap(); if (!map) return;
     RC.clear();
     let pts = [], def = 'trail', fromDraft = false;
+    // точность точек: тропа ближе этого — нитка остаётся на ней. Нарисованное раньше — как было (точно), новое — последний выбор
+    let tol = pr.plan && pr.plan.pts ? (+pr.plan.tol || 0) : (() => { try { return localStorage.nitkaTol != null ? +localStorage.nitkaTol : 100; } catch (e) { return 100; } })();
     if (pr.plan && pr.plan.pts) {
       pts = pr.plan.pts.map(p => ({ ...p })); def = (pts[0] && pts[0].mode) || 'trail';
-      (pr.plan.legs || []).forEach((g, i) => { const a = pts[i], b = pts[i + 1]; if (a && b && g.mode !== 'line' && g.pts && g.pts.length > 1) RC.set(lkey(a, b, g.mode), { pts: g.pts, ok: g.ok !== false, used: g.mode }); });
+      (pr.plan.legs || []).forEach((g, i) => { const a = pts[i], b = pts[i + 1]; if (a && b && g.mode !== 'line' && g.pts && g.pts.length > 1) RC.set(lkey(a, b, g.mode, tol), { pts: g.pts, ok: g.ok !== false, used: g.mode }); });
     }
-    let draft = null; try { draft = JSON.parse(localStorage[draftKey()] || 'null'); } catch (e) { draft = null; }
-    if (draft && draft.pts && JSON.stringify(draft.pts) !== JSON.stringify(pts)) { pts = draft.pts; def = draft.def || def; fromDraft = true; (draft.rc || []).forEach(([k, v]) => RC.set(k, v)); }
-    P = { pts, def, undo: [], redo: [], sel: null, prof: null, profKey: '', layer: L.layerGroup().addTo(map), catLayer: L.layerGroup().addTo(map), genLayer: L.layerGroup().addTo(map), hover: null, tab: 'draw', gen: null,
-      cat: new Map(), catBoxes: [], camps: new Map(), campBoxes: [], init: JSON.stringify(pr.plan ? pr.plan.pts : []), fromDraft };
+    // черновик: на сервере (с любого устройства) и в этом браузере — берём свежее
+    let local = null; try { local = JSON.parse(localStorage[draftKey()] || 'null'); } catch (e) { local = null; }
+    let server = null; try { server = (await api('GET', `/api/projects/${ctx.pid()}/plan-draft`, undefined, false, 'Открываю маршрут…')).draft; } catch (e) { server = null; }
+    const draft = [local, server].filter(d => d && Array.isArray(d.pts)).sort((x, y) => (y.t || 0) - (x.t || 0))[0] || null;
+    if (draft && JSON.stringify(draft.pts) !== JSON.stringify(pts)) { pts = draft.pts; def = draft.def || def; if (draft.tol != null) tol = +draft.tol; fromDraft = true; (draft.rc || []).forEach(([k, v]) => RC.set(k, v)); }
+    P = { pts, def, tol, undo: [], redo: [], sel: null, prof: null, profKey: '', layer: L.layerGroup().addTo(map), catLayer: L.layerGroup().addTo(map), genLayer: L.layerGroup().addTo(map), hover: null, tab: 'draw', gen: null,
+      cat: new Map(), catBoxes: [], camps: new Map(), campBoxes: [], init: JSON.stringify(pr.plan ? pr.plan.pts : []), fromDraft,
+      hasDraft: fromDraft, savedAt: fromDraft ? draft.t : 0, saveErr: false };
     map.on('moveend', loadCat); document.addEventListener('keydown', onKey); document.addEventListener('click', onClick, true); document.addEventListener('change', onChange, true); document.addEventListener('submit', onSubmit, true);
     const fit = pts.length ? pts.map(ll) : pr.pieces.filter(p => p.role !== 'skip').flatMap(p => p.pts.map(q => [q[0], q[1]]));
     if (fit.length) map.fitBounds(L.latLngBounds(fit).pad(0.15), { maxZoom: 14 });
-    if (fromDraft) toast('Продолжаю черновик маршрута — в поход он ещё не попал');
+    if (fromDraft) toast('Продолжаю черновик маршрута — в поход он попадёт по «Готово»');
     render(); loadCat(); schedProfile();
   }
   function close() {
     if (!P) return; const map = getMap();
+    if (draftT) { clearTimeout(draftT); draftT = 0; if (!P.noSave) sendDraft(); }      // не дождались паузы — отправляем сейчас
+    const keep = P.hasDraft && !P.noSave;
     map && map.off('moveend', loadCat); document.removeEventListener('keydown', onKey); document.removeEventListener('click', onClick, true); document.removeEventListener('change', onChange, true); document.removeEventListener('submit', onSubmit, true);
-    P.layer.remove(); P.catLayer.remove(); P.genLayer.remove(); P.hover && P.hover.remove(); P = null; ctx.onClose();
+    P.layer.remove(); P.catLayer.remove(); P.genLayer.remove(); P.hover && P.hover.remove(); P = null; ctx.onClose(keep);
   }
-  function cancel() {
-    const changed = JSON.stringify(P.pts) !== P.init;
-    const go = () => { try { delete localStorage[draftKey()]; } catch (e) { /* ок */ } close(); };
-    if (changed) return confirmBox('Выйти без сохранения?', 'Нарисованное не попадёт в поход, черновик сотрётся.', 'Выйти', go);
-    go();
+  function cancel() {      // ничего не теряется: черновик остаётся, продолжить — с шага «Треки»
+    const kept = P.hasDraft;
+    close();
+    if (kept) toast('Черновик маршрута сохранён — «Продолжить черновик» на шаге «Треки», с любого устройства');
   }
   async function done() {
     if (P.pts.length < 2) return toast('Поставь хотя бы две точки — старт и финиш', true);
     const legs = P.pts.slice(0, -1).map((_, i) => legOf(i));
     if (legs.some(g => g.busy)) return toast('Секунду — ещё ищу тропы на некоторых отрезках', true);
     try {
-      const r = await api('POST', `/api/projects/${ctx.pid()}/plan`, { plan: { pts: P.pts, legs: legs.map(g => ({ pts: g.pts, ok: g.ok })) } }, false, 'Переношу маршрут в поход…');
+      clearTimeout(draftT); draftT = 0;
+      const r = await api('POST', `/api/projects/${ctx.pid()}/plan`, { plan: { pts: P.pts, tol: P.tol, legs: legs.map(g => ({ pts: g.pts, ok: g.ok })) } }, false, 'Переношу маршрут в поход…');
       toast(r.msg, !r.ok); if (!r.ok) return;
-      try { delete localStorage[draftKey()]; } catch (e) { /* ок */ }
+      try { delete localStorage[draftKey()]; } catch (e) { /* ок */ }      // черновик стал маршрутом (на сервере он стёрт там же)
+      P.noSave = true; P.hasDraft = false;
       const done_ = ctx.onDone; close(); done_(r);
     } catch (e) { toast(e.message, true); }
   }
 
   // ---------------------------------------------------------------- точки и отрезки
-  const lkey = (a, b, mode) => `${mode}|${(+a.lat).toFixed(5)},${(+a.lon).toFixed(5)}|${(+b.lat).toFixed(5)},${(+b.lon).toFixed(5)}`;
+  const lkey = (a, b, mode, tol) => `${mode}|${mode === 'trail' ? tol || 0 : 0}|${(+a.lat).toFixed(5)},${(+a.lon).toFixed(5)}|${(+b.lat).toFixed(5)},${(+b.lon).toFixed(5)}`;
   function legOf(i) {
     const a = P.pts[i], b = P.pts[i + 1], mode = a.mode || P.def, line = [ll(a), ll(b)];
     if (mode === 'line') return { mode, pts: line, ok: true };
-    const k = lkey(a, b, mode), c = RC.get(k);
-    if (c && c !== 'busy') return { mode, pts: withEnds(c.pts, a, b), ok: c.ok, msg: c.msg, used: c.used, deg: c.deg };
+    const k = lkey(a, b, mode, P.tol), c = RC.get(k);
+    if (c && c !== 'busy') return { mode, pts: withEnds(c.pts, a, b, mode === 'trail' ? P.tol : 0), ok: c.ok, msg: c.msg, used: c.used, deg: c.deg };
     if (!c) fetchLeg(k, a, b, mode);
     return { mode, pts: line, ok: true, busy: true };
   }
   // тропа начинается не точно в точке маршрута: подход от точки к тропе и сход с неё — часть пути
-  function withEnds(pts, a, b) {
+  function withEnds(pts, a, b, tol = 0) {      // точка «примерно» (tol): тропа рядом — к самой точке не сворачиваем
     const out = pts.map(q => [q[0], q[1]]);
-    if (geo(out[0], ll(a)) > 5) out.unshift(ll(a)); else out[0] = ll(a);
-    if (geo(out[out.length - 1], ll(b)) > 5) out.push(ll(b)); else out[out.length - 1] = ll(b);
+    const d0 = geo(out[0], ll(a)), d1 = geo(out[out.length - 1], ll(b));
+    if (d0 <= tol) { /* остаёмся на тропе */ } else if (d0 > 5) out.unshift(ll(a)); else out[0] = ll(a);
+    if (d1 <= tol) { /* остаёмся на тропе */ } else if (d1 > 5) out.push(ll(b)); else out[out.length - 1] = ll(b);
     return out;
   }
-  function fetchLeg(k, a, b, mode) { RC.set(k, 'busy'); queue.push([k, a, b, mode]); pump(); }
+  function fetchLeg(k, a, b, mode) { RC.set(k, 'busy'); queue.push([k, a, b, mode, P.tol || 0]); pump(); }
   async function pump() {
     while (inflight < 3 && queue.length) {
-      const [k, a, b, mode] = queue.shift(); inflight++;
+      const [k, a, b, mode, tol] = queue.shift(); inflight++;
       (async () => {
         let v;
         try {
-          const r = await api('GET', `/api/projects/${ctx.pid()}/route?a=${a.lat},${a.lon}&b=${b.lat},${b.lon}&${mode === 'terrain' ? 'mode=terrain' : 'full=1'}`, undefined, false, false);
-          v = r.pts && r.pts.length > 1 ? { pts: r.pts, ok: mode === 'terrain' ? true : r.ok, used: r.used, deg: r.maxdeg, msg: r.ok ? '' : (mode === 'terrain' ? 'рельеф не посчитался — прямая' : 'тропы нет — по рельефу') }
+          const r = await api('GET', `/api/projects/${ctx.pid()}/route?a=${a.lat},${a.lon}&b=${b.lat},${b.lon}&${mode === 'terrain' ? 'mode=terrain' : `full=1&tol=${tol}`}`, undefined, false, false);
+          v = r.pts && r.pts.length > 1 ? { pts: r.pts, ok: mode === 'terrain' ? true : r.ok, used: r.used, deg: r.maxdeg, retry: !!r.busy, msg: r.ok ? '' : r.busy ? r.msg : (mode === 'terrain' ? 'рельеф не посчитался — прямая' : 'тропы нет — по рельефу') }
             : { pts: [ll(a), ll(b)], ok: false, msg: 'не нашёл пути — прямая' };
+          if (v.retry) setTimeout(() => { if (P && RC.get(k) === v) { RC.delete(k); render(); } }, 20000);      // сервис троп был занят — спросим ещё
         } catch (e) { v = { pts: [ll(a), ll(b)], ok: false, msg: /далеко/.test(e.message) ? 'далеко — поставь точку посередине' : 'не нашёл пути — прямая' }; }
         RC.set(k, v); inflight--;
-        if (P) { render(); schedProfile(); keepDraft(); }
+        if (P) { render(); schedProfile(); if (P.hasDraft) keepDraft(); }
         pump();
       })();
     }
   }
   const snap = () => { P.undo.push(JSON.stringify(P.pts)); if (P.undo.length > 150) P.undo.shift(); P.redo = []; };
   function changed() { P.prof = P.prof && { ...P.prof, stale: true }; render(); schedProfile(); keepDraft(); }
+  let draftT = 0;
+  const draftData = () => ({ pts: P.pts, def: P.def, tol: P.tol, t: Date.now(), rc: [...RC].filter(([, v]) => v !== 'busy' && !v.retry).slice(-300) });
   function keepDraft() {
-    try { localStorage[draftKey()] = JSON.stringify({ pts: P.pts, def: P.def, t: Date.now(), rc: [...RC].filter(([, v]) => v !== 'busy').slice(-300) }); } catch (e) { /* место кончилось — не страшно */ }
+    if (!P || P.noSave) return;
+    if (!P.hasDraft && JSON.stringify(P.pts) === P.init) return;      // ничего не меняли — черновика нет
+    P.hasDraft = true;
+    try { localStorage[draftKey()] = JSON.stringify(draftData()); } catch (e) { /* место кончилось — есть сервер */ }
+    clearTimeout(draftT); draftT = setTimeout(() => { draftT = 0; sendDraft(); }, 1500);
+    draftNote('сохраняю черновик…');
   }
+  async function sendDraft() {
+    if (!P || P.noSave) return; const pid = ctx.pid(), d = draftData();
+    try { await api('PUT', `/api/projects/${pid}/plan-draft`, { draft: d }, false, false); if (P) { P.savedAt = d.t; P.saveErr = false; draftNote(); } }
+    catch (e) { if (P) { P.saveErr = true; draftNote(); } }
+  }
+  function draftText() {
+    if (!P.hasDraft) return '';
+    if (P.saveErr) return 'черновик есть только в этом браузере — сервер не ответил';
+    if (!P.savedAt) return 'сохраняю черновик…';
+    const d = new Date(P.savedAt); return `черновик сохранён · ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+  }
+  function draftNote(t) { const el = document.querySelector('#panel .pldraft'); if (el) el.textContent = t || draftText(); }
   function addPoint(q, at) {
     snap(); const p = { lat: +(+q.lat).toFixed(6), lon: +(+(q.lon ?? q.lng)).toFixed(6), kind: q.kind || 'via', name: q.name || '', h: q.h ?? null, grade: q.grade || null, ref: q.ref || null, mode: P.def };
     if (at == null) P.pts.push(p); else P.pts.splice(at, 0, p);
@@ -381,7 +411,7 @@ export function createPlanner(ctx) {
     const go = () => {
       snap();
       P.pts = v.plan.pts.map(p => ({ ...p }));
-      v.plan.legs.forEach((g, i) => { const a = P.pts[i], b = P.pts[i + 1]; if (a && b && g.mode !== 'line') RC.set(lkey(a, b, g.mode), { pts: g.pts, ok: g.ok !== false, used: g.mode }); });
+      v.plan.legs.forEach((g, i) => { const a = P.pts[i], b = P.pts[i + 1]; if (a && b && g.mode !== 'line') RC.set(lkey(a, b, g.mode, P.tol), { pts: g.pts, ok: g.ok !== false, used: g.mode }); });
       P.tab = 'draw'; P.sel = null; genRender(); changed();
       toast('Вариант в маршруте — двигай точки, меняй отрезки и ночёвки, потом «Готово — в поход»');
     };
@@ -448,9 +478,11 @@ export function createPlanner(ctx) {
       <div class="plbar"><button class="btn sm" data-pl="cancel">Отмена</button><button class="btn go" data-pl="done" ${n < 2 ? 'disabled' : ''}>Готово — в поход</button></div>
       <div class="field"><span>Между точками</span><div class="seg sm even"><button class="${P.def === 'trail' ? 'on' : ''}" data-pl="def" data-v="trail">По тропам</button><button class="${P.def === 'terrain' ? 'on' : ''}" data-pl="def" data-v="terrain">По рельефу</button><button class="${P.def === 'line' ? 'on' : ''}" data-pl="def" data-v="line">Напрямую</button></div>
         <div class="hint">${P.def === 'trail' ? 'По тропам OpenStreetMap; где тропа не доходит до точки (перевал, вершина) — подход по рельефу, в обход скал. Тропы нет вовсе — весь отрезок по рельефу.' : P.def === 'terrain' ? 'Без троп: самый удобный путь по склонам — долинами, в обход круч (круче 35° почти не ходит), на седловину.' : 'Прямыми — как по линейке. Набор на гребнях выйдет завышенным, круче всего — смотри у отрезка.'} Это — для новых точек; у каждого отрезка свой переключатель ниже.</div></div>
+      <div class="field"><span>Точки</span><div class="seg sm even">${[[0, 'точно'], [100, '~100 м'], [250, '~250 м'], [500, '~500 м']].map(([v, t]) => `<button class="${(P.tol || 0) === v ? 'on' : ''}" data-pl="tol" data-v="${v}">${t}</button>`).join('')}</div>
+        <div class="hint">${P.tol ? `Точка — примерная отметка: если тропа проходит ближе ${P.tol} м от неё, нитка идёт по тропе и к самой точке не сворачивает.` : 'Нитка заходит в каждую точку, даже если тропа проходит рядом.'} Для отрезков «по тропам».</div></div>
       ${findHtml()}
       <div class="edstep plstep"><span>${step}</span></div>
-      ${P.fromDraft ? '<div class="hint">Это черновик из браузера — в поход он попадёт по «Готово». <a href="#" data-pl="drop">Отбросить черновик</a></div>' : ''}
+      ${P.hasDraft ? `<div class="hint plnote"><span class="pldraft">${draftText()}</span> · в поход попадёт по «Готово» · <a href="#" data-pl="drop">Отбросить черновик</a></div>` : ''}
       ${other ? '<div class="banner"><div>В походе уже есть загруженный трек — нарисованный маршрут добавится к нему как основная нитка. Если это вариант, отметь его в «Днях».</div></div>' : ''}
       ${n > 1 ? `<div class="pltot">${pr ? `<b>${kmTxt(pr.all.km * 1000)} км</b><span>+${pr.all.up} м</span><span>−${pr.all.dn} м</span>` : ''}<span>${pr && pr.days ? `${pr.days.length} ${pl(pr.days.length, 'день', 'дня', 'дней')}` : ''}</span>${busy ? `<span class="hint">ищу тропы: ${busy}</span>` : ''}${bad ? `<span class="warnx">без тропы: ${bad}</span>` : ''}</div>${profSvg()}` : ''}
       ${enrouteHtml()}
@@ -501,6 +533,7 @@ export function createPlanner(ctx) {
     const a = b.dataset.pl, i = +b.dataset.i;
     if (a === 'cancel') cancel(); else if (a === 'done') done(); else if (a === 'undo') undo(); else if (a === 'redo') redo();
     else if (a === 'def') { P.def = b.dataset.v; ctx.repaint(); keepDraft(); }
+    else if (a === 'tol') { P.tol = +b.dataset.v; try { localStorage.nitkaTol = P.tol; } catch (er) { /* ок */ } changed(); }
     else if (a === 'lmode') { snap(); P.pts[i].mode = b.dataset.v; changed(); }
     else if (a === 'del') delPoint(i);
     else if (a === 'tab') { P.tab = b.dataset.v; if (P.tab === 'gen') genInit(); P.layer.eachLayer(l => l.setStyle && l.setStyle({ opacity: P.tab === 'gen' ? .25 : 1 })); genRender(); drawCat(); ctx.repaint(); }
@@ -514,7 +547,12 @@ export function createPlanner(ctx) {
     else if (a === 'gmore3') { P.gen.more3 = true; ctx.repaint(); }
     else if (a === 'gunpick') { const id = b.dataset.id; P.gen.must = P.gen.must.filter(x => x.id !== id); P.gen.ban = P.gen.ban.filter(x => x.id !== id); drawCat(); ctx.repaint(); }
     else if (a === 'goto') { const f = P.found[i], map = getMap(); P.found = null; if (f.bbox) map.fitBounds([[f.bbox[0], f.bbox[2]], [f.bbox[1], f.bbox[3]]], { maxZoom: 13 }); else map.setView([f.lat, f.lon], 12); ctx.repaint(); }
-    else if (a === 'drop') { try { delete localStorage[draftKey()]; } catch (er) { /* ок */ } const pr = ctx.proj(); P.pts = pr.plan ? pr.plan.pts.map(p => ({ ...p })) : []; P.fromDraft = false; P.undo = []; changed(); }
+    else if (a === 'drop') confirmBox('Отбросить черновик?', 'Нарисованное после последнего «Готово» пропадёт — и здесь, и на других устройствах.', 'Отбросить', () => {
+      try { delete localStorage[draftKey()]; } catch (er) { /* ок */ }
+      clearTimeout(draftT); draftT = 0; api('DELETE', `/api/projects/${ctx.pid()}/plan-draft`, undefined, false, false).catch(() => {});
+      const pr = ctx.proj(); P.pts = pr.plan ? pr.plan.pts.map(p => ({ ...p })) : []; P.fromDraft = false; P.hasDraft = false; P.undo = []; P.redo = [];
+      P.prof = null; render(); schedProfile(); toast('Черновик отброшен');
+    });
   }
   async function onSubmit(e) {
     const f = e.target.closest('[data-plfind]'); if (!f || !P) return; e.preventDefault();

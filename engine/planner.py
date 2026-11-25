@@ -35,20 +35,26 @@ def clean(plan):
         K.append(dict(lat=round(lat, 6), lon=round(lon, 6), kind=kind, name=str(p.get('name') or '')[:80], h=h,
                       grade=str(p.get('grade') or '')[:6] or None, ref=str(p.get('ref') or '')[:40] or None,
                       mode=p.get('mode') if p.get('mode') in ('line', 'terrain') else 'trail'))
+    try: tol = max(0, min(1000, int(plan.get('tol') or 0)))
+    except (TypeError, ValueError): tol = 0
     legs = []
     for i, g in enumerate((plan.get('legs') or [])[:max(0, len(K) - 1)]):
         try: pts = [[round(float(q[0]), 6), round(float(q[1]), 6)] for q in (g.get('pts') or [])][:MAX_LEG]
         except (TypeError, ValueError, IndexError): pts = []
         a, b = [K[i]['lat'], K[i]['lon']], [K[i + 1]['lat'], K[i + 1]['lon']]
         if len(pts) < 2: pts = [a, b]
-        if dist(pts[0], a) > 5: pts.insert(0, a)      # отрезок всегда от точки до точки: подход к тропе и сход с неё — часть пути
+        # отрезок от точки до точки: подход к тропе и сход с неё — часть пути; но точка «примерно» (tol) — нитка остаётся на тропе
+        t_ = tol if K[i]['mode'] == 'trail' else 0
+        if dist(pts[0], a) <= t_: pass
+        elif dist(pts[0], a) > 5: pts.insert(0, a)
         else: pts[0] = a
-        if dist(pts[-1], b) > 5: pts.append(b)
+        if dist(pts[-1], b) <= t_: pass
+        elif dist(pts[-1], b) > 5: pts.append(b)
         else: pts[-1] = b
         legs.append(dict(mode=K[i]['mode'], pts=pts, ok=bool(g.get('ok', True))))
     while len(legs) < len(K) - 1:
         i = len(legs); legs.append(dict(mode='line', pts=[[K[i]['lat'], K[i]['lon']], [K[i + 1]['lat'], K[i + 1]['lon']]], ok=True))
-    return dict(pts=K, legs=legs)
+    return dict(pts=K, legs=legs, tol=tol)
 
 
 def title(k):
@@ -62,7 +68,7 @@ def apply(proj, plan):
     """План → куски по дням (ночёвки делят маршрут), ночёвки, перевалы и вершины. Возвращает {ok, msg, days, km}."""
     P = clean(plan); K, legs = P['pts'], P['legs']
     if len(K) < 2: return dict(ok=False, msg='Нужно хотя бы две точки маршрута.')
-    days = []; cur = [[K[0]['lat'], K[0]['lon']]]; first = 0
+    days = []; cur = [list(legs[0]['pts'][0])]; first = 0      # с допуском старт может быть на тропе, а не в самой точке
     for i, g in enumerate(legs):
         pts = densify(g['pts']) if g['mode'] != 'trail' else g['pts']
         cur.extend(pts[1:])
