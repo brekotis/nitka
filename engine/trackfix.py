@@ -3,7 +3,7 @@
 Выброс — трек вдруг улетает (к аэропорту, в чужой город, по кругу) и потом возвращается почти туда же,
 откуда улетел. Такой кусок вырезается, края соединяются прямой — или участок перерисовывается вручную.
 """
-import json, math, statistics, urllib.parse, urllib.request
+import json, math, statistics, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
 from xml.sax.saxutils import escape, quoteattr
 from .classify import dist, length_km, piece_times, set_times, trip_tz, hm, uid
@@ -305,20 +305,65 @@ def accept(proj, d):
     return dict(ok=True, msg='Отмечено: это не ошибка. Проверка больше не покажет это место.')
 
 
+_BR = threading.BoundedSemaphore(2)      # публичный BRouter ограничивает частоту: не больше двух запросов сразу
+_BR_GAP, _BR_LAST, _BR_LOCK = 0.35, [0.0], threading.Lock()
+BUSY = [0]      # сколько раз BRouter так и не ответил (перегружен) — такой отказ не значит «тропы нет»
+
+def _brouter(q):
+    """Запрос к BRouter с кэшем на диске (30 дней). «Повтори позже» (403/429/5xx) и сбои связи — пауза и повтор;
+    ошибка маршрута («пути нет») — None и запоминается. Не дождались — None и BUSY += 1 (в кэш не пишется)."""
+    import hashlib, os
+    from . import mapkit
+    qs = urllib.parse.urlencode(sorted(q.items()))
+    path = os.path.join(mapkit.CACHE, 'brouter', hashlib.sha1(qs.encode()).hexdigest() + '.json')
+    try:
+        if time.time() - os.path.getmtime(path) < 30 * 86400:
+            with open(path, encoding='utf-8') as f: return json.load(f)
+    except (OSError, ValueError): pass
+    def keep(v):
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path + '.tmp', 'w', encoding='utf-8') as f: json.dump(v, f)
+            os.replace(path + '.tmp', path)
+        except OSError: pass
+        return v
+    url = 'https://brouter.de/brouter?' + qs
+    for attempt in range(5):
+        try:
+            with _BR:
+                with _BR_LOCK:
+                    wait = _BR_GAP - (time.time() - _BR_LAST[0])
+                    if wait > 0: time.sleep(wait)
+                    _BR_LAST[0] = time.time()
+                with urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'nitka-hiking-report-maps/1.0'}), timeout=25) as r:
+                    g = json.loads(r.read().decode('utf-8'))
+            return keep([[round(c[1], 6), round(c[0], 6)] for c in g['features'][0]['geometry']['coordinates']])
+        except urllib.error.HTTPError as e:
+            if e.code in (403, 429, 500, 502, 503, 504): time.sleep(min(12, 1.5 * 2 ** attempt)); continue
+            return keep(None)      # BRouter сказал, что пути нет
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
+            time.sleep(1.5 * (attempt + 1)); continue
+        except Exception:
+            return keep(None)
+    BUSY[0] += 1
+    return None
+
+
 def route(a, b, kind='', nogos=()):
     """Путь по тропам OpenStreetMap между двумя точками — через публичный BRouter (brouter.de). None — не получилось.
     nogos — [(lat, lon, радиус м)]: места, через которые идти нельзя (седловины запрещённых перевалов)."""
     prof = 'trekking' if kind == 'вело' else 'hiking-mountain'
     q = dict(lonlats=f'{a[1]:.6f},{a[0]:.6f}|{b[1]:.6f},{b[0]:.6f}', profile=prof, alternativeidx=0, format='geojson')
     if nogos: q['nogos'] = '|'.join(f'{lo:.6f},{la:.6f},{int(r)}' for la, lo, r in nogos)
-    url = 'https://brouter.de/brouter?' + urllib.parse.urlencode(q)
-    try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'nitka-hiking-report-maps/1.0'}), timeout=15) as r:
-            g = json.loads(r.read().decode('utf-8'))
-        c = g['features'][0]['geometry']['coordinates']
-        return [[round(q[1], 6), round(q[0], 6)] for q in c]
-    except Exception:
-        return None
+    return _brouter(q)
+
+
+def route_via(pts, kind='', nogos=()):
+    """Путь по тропам через несколько точек (BRouter, точки по порядку). None — не получилось."""
+    prof = 'trekking' if kind == 'вело' else 'hiking-mountain'
+    q = dict(lonlats='|'.join(f'{p[1]:.6f},{p[0]:.6f}' for p in pts), profile=prof, alternativeidx=0, format='geojson')
+    if nogos: q['nogos'] = '|'.join(f'{lo:.6f},{la:.6f},{int(r)}' for la, lo, r in nogos)
+    return _brouter(q)
 
 
 def export_gpx(proj, step=0, split='day'):

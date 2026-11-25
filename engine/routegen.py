@@ -11,7 +11,7 @@
 import math, threading
 from concurrent.futures import ThreadPoolExecutor
 from .classify import dist
-from . import dem, suggest, terrain
+from . import dem, suggest, terrain, trackfix
 
 GRADES = ['н/к', '1А', '1Б', '2А', '2Б', '3А', '3Б']
 DETOUR = 1.35          # тропа длиннее прямой примерно на треть
@@ -129,12 +129,14 @@ def _leg(a, b, trail, kind, avoid=()):
     key = (round(a[0], 5), round(a[1], 5), round(b[0], 5), round(b[1], 5), kind, trail, avoid)
     with _RC_LOCK: hit = _RC.get(key)
     if hit: return hit
+    busy0 = trackfix.BUSY[0]
     if trail:
         pts, ok, mode, _ = terrain.trail_leg(a, b, kind, avoid=avoid)
     else:
         pts, info = terrain.path(a, b, avoid=avoid); ok, mode = True, 'terrain'
         if not pts: pts, mode = [[a[0], a[1]], [b[0], b[1]]], 'line'
     res = (pts, ok, mode)
+    if trackfix.BUSY[0] > busy0: return res      # отказ из-за перегрузки BRouter не запоминаем
     with _RC_LOCK:
         if len(_RC) > 5000: _RC.clear()
         _RC[key] = res
@@ -154,6 +156,30 @@ def _climb(a, b, avoid=()):
     return res
 
 
+_SIDE = {}
+def _side(c, frm, other, avoid=(), kind=''):
+    """Тропа с одной стороны перевала: BRouter от долины (frm) до седловины. Годится, если доходит до самого перевала
+    (до 150 м), начинается со своей стороны гребня и не петляет. → точки от долины до перевала или None (тогда — по рельефу)."""
+    p = tuple(c['p']); key = (c['id'], round(frm[0], 5), round(frm[1], 5), kind, tuple(avoid))
+    if key in _SIDE: return _SIDE[key]
+    near = [x for x in avoid if dist((x[0], x[1]), p) > 400]
+    res = None
+    busy0 = trackfix.BUSY[0]
+    try: pts = trackfix.route_via([tuple(frm), p], kind, near)
+    except Exception: pts = None
+    if pts is None and trackfix.BUSY[0] > busy0: return None      # BRouter перегружен — это не «тропы нет», не запоминаем
+    if pts and len(pts) > 1:
+        a, b = pts[0], pts[-1]
+        L = sum(dist(x, y) for x, y in zip(pts, pts[1:]))
+        k = math.cos(math.radians(p[0]))
+        side = lambda q: ((q[1] - p[1]) * k * (frm[1] - p[1]) * k + (q[0] - p[0]) * (frm[0] - p[0]))      # > 0 — та же сторона гребня, что и долина frm
+        if dist(b, p) <= 150 and side(a) > 0 and dist(a, p) > 300 and L <= 3 * dist(frm, p) + 3000:
+            res = [list(q) for q in pts[:-1]] + [list(p)]
+    if len(_SIDE) > 5000: _SIDE.clear()
+    _SIDE[key] = res
+    return res
+
+
 def _near_idx(G, p, lim=220.0):
     k = math.cos(math.radians(p[0])); best = None
     for i in range(len(G)):
@@ -170,25 +196,37 @@ def build(start, finish, chain, trail, kind, days, ex, sites=(), allp=(), quota=
     keys = [dict(lat=start[0], lon=start[1], kind='via', name='старт')] + \
            [dict(lat=c['p'][0], lon=c['p'][1], kind='pass', name=c['name'], h=c['h'], grade=c['grade'], ref=c['id']) for c in chain] + \
            [dict(lat=finish[0], lon=finish[1], kind='via', name='финиш')]
-    ins = [tuple(start)] + [tuple(c['sin']) for c in chain] + [tuple(finish)]
-    outs = [tuple(start)] + [tuple(c['sout']) for c in chain] + [tuple(finish)]
+    # запретные седловины (категории, которых не просили, и «не через него»), кроме тех, что вплотную к выбранным точкам
+    keep_clear = [tuple(start), tuple(finish)] + [tuple(c['p']) for c in chain] + [tuple(c['sin']) for c in chain] + [tuple(c['sout']) for c in chain]
+    avoid = tuple((f['p'][0], f['p'][1], 300) for f in forbid if all(dist(f['p'], q) > 700 for q in keep_clear))
+    # «по тропам»: подъём на перевал и спуск — тропой с той стороны, где она доходит до седловины; где нет — по рельефу
+    sides_jobs = [(c, c['sin'], c['sout']) for c in chain if c.get('sides')] + [(c, c['sout'], c['sin']) for c in chain if c.get('sides')]
+    got = dict(zip([(c['id'], tuple(f)) for c, f, o in sides_jobs], ex.map(lambda x: _side(x[0], x[1], x[2], avoid, kind) if trail else None, sides_jobs)))
+    halves = []
+    for c in chain:
+        up_ = got.get((c['id'], tuple(c['sin']))) if c.get('sides') else None
+        dn_ = got.get((c['id'], tuple(c['sout']))) if c.get('sides') else None
+        halves.append((up_, [q for q in reversed(dn_)] if dn_ else None))
+    ins = [tuple(start)] + [tuple(hv[0][0]) if hv[0] else tuple(c['sin']) for c, hv in zip(chain, halves)] + [tuple(finish)]
+    outs = [tuple(start)] + [tuple(hv[1][-1]) if hv[1] else tuple(c['sout']) for c, hv in zip(chain, halves)] + [tuple(finish)]
     jobs = []
     for i in range(len(keys) - 1):
         a, b = (keys[i]['lat'], keys[i]['lon']), (keys[i + 1]['lat'], keys[i + 1]['lon'])
         part = []
-        if outs[i] != a: part.append(('c', a, outs[i]))
+        hv_a = halves[i - 1] if 0 < i <= len(chain) else None; hv_b = halves[i] if i < len(chain) else None
+        if hv_a and hv_a[1]: part.append(('k', hv_a[1]))      # спуск с перевала по тропе
+        elif outs[i] != a: part.append(('c', a, outs[i]))      # тропы нет — по рельефу
         part.append(('l', outs[i], ins[i + 1]))
-        if ins[i + 1] != b: part.append(('c', ins[i + 1], b))
+        if hv_b and hv_b[0]: part.append(('k', hv_b[0]))      # подъём на перевал по тропе
+        elif ins[i + 1] != b: part.append(('c', ins[i + 1], b))
         jobs.append(part)
     flat = [x for part in jobs for x in part]
-    # запретные седловины (категории, которых не просили, и «не через него»), кроме тех, что вплотную к выбранным точкам
-    keep_clear = [tuple(start), tuple(finish)] + [tuple(c['p']) for c in chain] + [tuple(c['sin']) for c in chain] + [tuple(c['sout']) for c in chain]
-    avoid = tuple((f['p'][0], f['p'][1], 300) for f in forbid if all(dist(f['p'], q) > 700 for q in keep_clear))
-    res = list(ex.map(lambda x: _climb(x[1], x[2], avoid) if x[0] == 'c' else _leg(x[1], x[2], trail, kind, avoid), flat))
+    res = list(ex.map(lambda x: (x[1], True, 'trail') if x[0] == 'k' else _climb(x[1], x[2], avoid) if x[0] == 'c' else _leg(x[1], x[2], trail, kind, avoid), flat))
     legs = []; it = iter(res)
     for part in jobs:
         pts, ok, mode = [], True, 'terrain'
-        for kind_, _, _ in part:
+        for x in part:
+            kind_ = x[0]
             q, ok_, m_ = next(it)
             pts += q if not pts else q[1:]
             if kind_ == 'l': ok, mode = ok_, m_
@@ -273,7 +311,7 @@ def build(start, finish, chain, trail, kind, days, ex, sites=(), allp=(), quota=
                              mode=mode if n + 1 < len(K) else ('trail' if trail else 'terrain')))
     nolink = sum(1 for pts, ok, mode in legs if trail and not ok)
     step = max(1, len(G) // 300)
-    order = sorted([(m, dict(name=c['name'], grade=c['grade'], h=c['h'], note=c['note'], ref=c['id'], crossed=c['name'] not in uturn)) for c, m in zip(chain, marks[1:-1])] +
+    order = sorted([(m, dict(name=c['name'], grade=c['grade'], h=c['h'], note=c['note'], ref=c['id'], crossed=c['name'] not in uturn, trail=(('both' if hv[0] and hv[1] else 'one' if hv[0] or hv[1] else 'none') if trail else None))) for c, m, hv in zip(chain, marks[1:-1], halves)] +
                    [(x['i'], dict(name=x['name'], grade=x['grade'], h=x['h'], note=x['note'], ref=x['id'], crossed=True, extra=True)) for x in extra], key=lambda x: x[0])
     return dict(km=round(total / 1000, 1), up=int(up), dn=int(dn), nolink=nolink, legs=len(legs), uturn=uturn, over=over, banned=banned,
                 passes=[x[1] for x in order],
@@ -286,6 +324,7 @@ def propose(start, finish, km, quota=None, days=None, trail=True, kind='', exclu
     """quota — {категория: (от, до)}; must — перевалы, через которые маршрут идёт обязательно.
     progress(**поля) — ход работы для показа на карте: этап, кандидаты, перебираемые цепочки, готовые варианты. → {ok, variants | msg}."""
     rep = progress or (lambda **kw: None)
+    busy0 = trackfix.BUSY[0]
     quota = {g: (max(0, min(6, int(a))), max(0, min(6, int(b)))) for g, (a, b) in (quota or {'1А': (1, 2), '1Б': (0, 1)}).items() if g in GRADES}
     quota = {g: (a, max(a, b)) for g, (a, b) in quota.items()}
     must = [str(x) for x in must][:6]
@@ -359,4 +398,6 @@ def propose(start, finish, km, quota=None, days=None, trail=True, kind='', exclu
         U.append(v)
     V = U[:k]
     for v in V: v['delta'] = round(v['km'] - float(km), 1)
-    return dict(ok=True, variants=V, cands=len(C))
+    busy = trackfix.BUSY[0] > busy0
+    return dict(ok=True, variants=V, cands=len(C), busy=busy,
+                warn='Сервис троп (BRouter) был перегружен — часть отрезков могла пойти по рельефу, хотя тропа там есть. Подбери ещё раз через минуту — то, что уже нашлось, запомнено.' if busy else '')

@@ -323,7 +323,7 @@ export function createPlanner(ctx) {
       ${G.msg ? `<div class="banner"><div>${esc(G.msg)}</div></div>` : ''}
       ${G.res.length ? `<div class="gvars">${G.res.map((v, i) => `<div class="gvar${i === G.sel ? ' sel' : ''}" data-pl="gsel" data-i="${i}" style="--vc:${VCOL[i % VCOL.length]}">
           <div class="gvh"><b>Вариант ${i + 1}</b><span class="gkm">${String(v.km).replace('.', ',')} км</span><span class="hint">${v.delta > 0 ? '+' : ''}${String(v.delta).replace('.', ',')} к задуманному</span><span>+${v.up} / −${v.dn} м</span></div>
-          <div class="gps">${v.passes.map(p => `<span class="gp${p.extra ? ' extra' : ''}${p.crossed === false ? ' bad' : ''}" style="--g:${ctx.gcol()[p.grade] || '#7d8a99'}" title="${esc((p.extra ? 'По пути: нитка сама переваливает через него. ' : '') + (p.crossed === false ? 'Нитка подходит к нему, но не переходит в другую долину. ' : '') + (p.note || ''))}"><b>${esc(p.grade || '?')}</b>${esc(p.name.replace(/^пер\.\s*/, ''))}${p.h ? ` <i>${p.h}</i>` : ''}${p.extra ? ' <u>по пути</u>' : ''}</span>`).join('')}</div>
+          <div class="gps">${v.passes.map(p => `<span class="gp${p.extra ? ' extra' : ''}${p.crossed === false ? ' bad' : ''}" style="--g:${ctx.gcol()[p.grade] || '#7d8a99'}" title="${esc((p.extra ? 'По пути: нитка сама переваливает через него. ' : '') + (p.crossed === false ? 'Нитка подходит к нему, но не переходит в другую долину. ' : '') + (p.note || ''))}"><b>${esc(p.grade || '?')}</b>${esc(p.name.replace(/^пер\.\s*/, ''))}${p.h ? ` <i>${p.h}</i>` : ''}${p.extra ? ' <u>по пути</u>' : p.trail === 'none' ? ' <u>без тропы</u>' : p.trail === 'one' ? ' <u>тропа с одной стороны</u>' : ''}</span>`).join('')}</div>
           ${(v.over || []).length ? `<div class="warnx">Перевалов больше, чем просил: ${esc(v.over.join('; '))} — с учётом тех, что по пути</div>` : ''}
           ${(v.uturn || []).length ? `<div class="warnx">${esc(v.uturn.join(', '))}: подход без перехода в другую долину</div>` : ''}
           ${v.camps.length ? `<div class="hint">Ночёвки: ${v.camps.map(c => `${String(c.km).replace('.', ',')} км, ${c.h} м${c.name ? ` — <b>${esc(c.name)}</b>` : ''}`).join(' · ')}</div>` : ''}
@@ -358,7 +358,7 @@ export function createPlanner(ctx) {
       if (r.state !== 'done') { progLive(); continue; }
       if (r.state === 'done') {
         G.job = null;
-        if (!r.ok) G.msg = r.msg;
+        if (!r.ok) G.msg = r.msg; else if (r.warn) G.msg = r.warn;
         else { const n0 = G.res.length; G.res.push(...r.variants); G.sel = n0; r.variants.forEach(v => v.passes.forEach(p => { if (!G.must.some(x => x.id === p.ref)) G.shown.push(p.ref); }));
           const b = L.latLngBounds(r.variants.flatMap(v => v.line)); getMap().fitBounds(b.pad(0.1)); }
       }
