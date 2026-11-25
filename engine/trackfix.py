@@ -17,6 +17,33 @@ def _pl(n, a, b, c):
     n = abs(n) % 100; m = n % 10
     return c if 11 <= n <= 14 else a if m == 1 else b if 2 <= m <= 4 else c
 
+def _k(q):
+    """Ключ точки: координаты до ~1 м."""
+    return f'{q[0]:.5f},{q[1]:.5f}'
+
+def _mark_manual(p, pts):
+    """Эти точки поставил человек — проверка трека их больше не трогает."""
+    m = list(p.get('man') or []); have = {_k(q) for q in m}
+    for q in pts:
+        if _k(q) not in have: m.append([round(q[0], 5), round(q[1], 5)]); have.add(_k(q))
+    alive = {_k(q) for q in p['pts']}
+    p['man'] = [q for q in m if _k(q) in alive][-5000:]
+
+def _interp(vals, pos):
+    """Пропуски (None) — по соседям, пропорционально пути pos."""
+    known = [i for i, v in enumerate(vals) if v is not None]
+    if not known: return None
+    out = list(vals)
+    for i in range(len(out)):
+        if out[i] is not None: continue
+        a = max((k for k in known if k < i), default=None); b = min((k for k in known if k > i), default=None)
+        if a is None: out[i] = out[b]
+        elif b is None: out[i] = out[a]
+        else:
+            f = (pos[i] - pos[a]) / (pos[b] - pos[a]) if pos[b] > pos[a] else 0.5
+            out[i] = out[a] + (out[b] - out[a]) * f
+    return out
+
 def check(proj):
     """Находки по всем кускам: dict(kind='excursion'|'gap', piece, name, day, i0, i1, km, at, lat, lon)."""
     vmax = SPEED_MAX.get(proj.get('meta', {}).get('kind'), 40)
@@ -26,13 +53,15 @@ def check(proj):
         pts = p.get('pts') or []
         if p.get('role') not in EDIT_ROLES or len(pts) < 4: continue
         ts = piece_times(p); n = len(pts)
+        man = {_k(q) for q in p.get('man') or []}; oks = set(p.get('okseg') or [])
+        skip = lambda i: _k(pts[i]) in man or _k(pts[i + 1]) in man or f'{_k(pts[i])}|{_k(pts[i + 1])}' in oks
         seg = [dist(pts[i][:2], pts[i + 1][:2]) for i in range(n - 1)]
         med = statistics.median(seg) or 1.0
         big_m = max(300.0, 20 * med)      # записанный трек идёт через 10–30 м: пропуск в 300 м — уже потеря сигнала
         i = 0
         while i < n - 1:
             fast = ts and seg[i] > 200 and seg[i] / max(1.0, ts[i + 1] - ts[i]) * 3.6 > vmax
-            if seg[i] < big_m and not fast: i += 1; continue
+            if (seg[i] < big_m and not fast) or skip(i): i += 1; continue
             a = pts[i][:2]; back = None
             for j in range(i + 1, min(n - 1, i + 600)):
                 if dist(pts[j + 1][:2], a) < max(300.0, 3 * med): back = j; break
@@ -102,9 +131,50 @@ def edit(proj, d):
         if ts:
             tmid = [ts[i0] + (ts[i1] - ts[i0]) * (L[k] / L[-1] if L[-1] else 0.5) for k in range(1, len(new) + 1)]
             set_times(p, ts[:i0 + 1] + tmid + ts[i1:])
-        p['km'] = round(length_km(p['pts']), 2)
+        p['km'] = round(length_km(p['pts']), 2); _mark_manual(p, mid or [pts[i0], pts[i1]])
         return dict(ok=True, msg=f'Участок перерисован: {len(new)} {_pl(len(new), "точка", "точки", "точек")}.')
     return dict(ok=False, msg='Неизвестное действие.')
+
+
+def replace(proj, d):
+    """Сохранение из редактора: кусок целиком. Точки, которые не менялись, сохраняют высоту и время;
+    новые и передвинутые получают их по соседям (пропорционально пути) и считаются поставленными человеком."""
+    p = next((x for x in proj.get('pieces', []) if x['id'] == d.get('piece')), None)
+    if not p: return dict(ok=False, msg='Кусок не найден — обнови страницу.')
+    try: new = [[round(float(q[0]), 6), round(float(q[1]), 6)] for q in (d.get('pts') or [])][:20000]
+    except (TypeError, ValueError, IndexError): return dict(ok=False, msg='Неверные точки.')
+    if len(new) < 2: return dict(ok=False, msg='В куске должно остаться хотя бы две точки. Ненужный кусок отметь «не использовать».')
+    old = p['pts']; ts = piece_times(p)
+    known = {}
+    for i, q in enumerate(old): known.setdefault(_k(q), (q[2] if len(q) > 2 else None, ts[i] if ts else None))
+    has_ele = any(len(q) > 2 for q in old)
+    eles = [known.get(_k(q), (None, None))[0] for q in new]; tms = [known.get(_k(q), (None, None))[1] for q in new]
+    pos = [0.0]
+    for a, b in zip(new, new[1:]): pos.append(pos[-1] + dist(a, b))
+    if has_ele:
+        eles = _interp(eles, pos)
+        if eles: new = [q + [round(e, 1)] for q, e in zip(new, eles)]
+    nt = _interp(tms, pos) if ts else None
+    if nt:
+        for i in range(1, len(nt)): nt[i] = max(nt[i], nt[i - 1])      # время не идёт назад, даже если точку утащили «против хода»
+    manual = [q for q in new if _k(q) not in known]
+    _remember(p)
+    p['pts'] = new; set_times(p, nt) if nt else (p.pop('tm', None), p.pop('t0', None))
+    p['km'] = round(length_km(new), 2); _mark_manual(p, manual)
+    return dict(ok=True, msg=f'Трек сохранён: {len(new)} {_pl(len(new), "точка", "точки", "точек")}, {str(p["km"]).replace(".", ",")} км.')
+
+
+def accept(proj, d):
+    """«Это не ошибка»: отрезок больше не попадает в проверку трека."""
+    p = next((x for x in proj.get('pieces', []) if x['id'] == d.get('piece')), None)
+    try: i0, i1 = int(d['i0']), int(d['i1'])
+    except (KeyError, TypeError, ValueError): return dict(ok=False, msg='Не указан участок.')
+    if not p or not (0 <= i0 < len(p['pts']) and 0 <= i1 < len(p['pts'])): return dict(ok=False, msg='Кусок изменился — обнови страницу.')
+    a, b = (i0 - 1, i0) if d.get('kind') == 'excursion' else (i0, i1)      # у выброса помечаем прыжок «туда» и «обратно»
+    keys = [f'{_k(p["pts"][a])}|{_k(p["pts"][b])}']
+    if d.get('kind') == 'excursion' and i1 + 1 < len(p['pts']): keys.append(f'{_k(p["pts"][i1])}|{_k(p["pts"][i1 + 1])}')
+    p['okseg'] = list(dict.fromkeys((p.get('okseg') or []) + keys))[-500:]
+    return dict(ok=True, msg='Отмечено: это не ошибка. Проверка больше не покажет это место.')
 
 
 def route(a, b, kind=''):

@@ -589,3 +589,42 @@ table.sum:not(.adm) td.w { white-space: normal; min-width: 12em; width: auto; }
 .news-d { font: 700 12.5px var(--head); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
 .news-i { display: grid; gap: 3px; padding: 8px 12px; border-left: 4px solid var(--sun); background: var(--sky-xl); border-radius: 0 10px 10px 0; font-size: 14px; line-height: 1.45; }
 .news-i b { font: 800 16px var(--head); color: var(--navy); letter-spacing: .02em; }
+
+/* ---------- редактор трека */
+.edbar { position: absolute; z-index: 900; left: 10px; right: 10px; top: 10px; background: var(--paper); border: var(--line); border-radius: 14px; box-shadow: var(--sh); padding: 8px 10px; display: grid; gap: 6px; }
+.edbar .edrow { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.edbar .edt { font: 800 19px var(--head); color: var(--navy); letter-spacing: .02em; }
+.edbar .edn { font-size: 13px; color: var(--muted); } .edbar .edn i { color: var(--red); font-style: normal; font-weight: 600; }
+.edbar .sp { flex: 1; }
+.edbar .icon { width: 34px; height: 34px; border: 2px solid var(--navy); border-radius: 9px; background: var(--paper); color: var(--navy); font-size: 18px; cursor: pointer; }
+.edbar .icon:disabled { opacity: .3; cursor: default; }
+.edbar .seg.tools button { font-size: 14px; padding: 5px 12px; }
+.edbar .edhint { font-size: 12.5px; color: var(--muted); line-height: 1.35; }
+.edbar .edhint b { color: var(--navy); }
+.edh { background: #fff; border: 3px solid #F68A1D; border-radius: 50%; box-sizing: border-box; box-shadow: 0 0 0 1px rgba(11, 42, 77, .35); cursor: grab; }
+.edh.end { border-color: #0B8A3E; }
+.edh.sel { background: #E2001A; border-color: #fff; box-shadow: 0 0 0 2px #E2001A; }
+.edg { background: rgba(246, 138, 29, .5); border: 2px solid #fff; border-radius: 50%; box-sizing: border-box; transform-origin: center; cursor: copy; opacity: .85; }
+.edg:hover { opacity: 1; background: #F68A1D; }
+/* режим правки — явно: панель приглушена, шаги и слои не мешают */
+body.editing .mapbar, body.editing .maphint { display: none; }
+body.editing .steps { pointer-events: none; opacity: .45; }
+body.editing .panel { pointer-events: none; }
+body.editing .panel > * { opacity: .3; }
+body.editing .panel::before { content: 'Идёт правка трека — сохрани или отмени её на панели над картой'; position: sticky; top: 0; z-index: 50; order: -1; flex: none; margin: -20px -20px 0; padding: 12px 16px; background: #F68A1D; color: #fff; font: 800 17px var(--head); letter-spacing: .02em; text-align: center; }
+body.editing .leaflet-container { outline: 4px solid #F68A1D; outline-offset: -4px; }
+@media (max-width: 880px) { .edbar { left: 6px; right: 6px; top: 6px; padding: 6px 8px; } .edbar .edt { font-size: 16px; } .edbar .edhint { display: none; } }
+@media (pointer: coarse) { .edbar .seg.tools button { padding: 7px 12px; } .edbar .icon { width: 40px; height: 40px; } }
+/* панель редактора не вылезает за край: строки переносятся, на телефоне «Сохранить» — всегда видно */
+.edbar { grid-template-columns: minmax(0, 1fr); }
+.edbar .edrow > * { min-width: 0; }
+.edbar .seg.tools { flex-wrap: wrap; }
+@media (max-width: 880px) {
+  .edbar .edrow:first-child { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto auto; }
+  .edbar .edrow:first-child .edt { grid-column: 1; }
+  .edbar .edrow:first-child .edn { grid-column: 1 / -1; grid-row: 2; font-size: 12px; }
+  .edbar .edrow:first-child .sp { display: none; }
+  .edbar .seg.tools { border-radius: 12px; width: 100%; }
+  .edbar .seg.tools button { flex: 1 1 auto; padding: 6px 8px; font-size: 12.5px; }
+  body.editing #maphandle { display: none; }
+}

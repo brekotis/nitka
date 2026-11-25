@@ -155,8 +155,8 @@ def for_client(proj):
     tz = classify.trip_tz(proj, next((p['pts'][0][1] for p in proj.get('pieces', []) if p.get('pts')), None))
     for p in proj.get('pieces', []):
         ts = classify.piece_times(p)
-        if any(k in p for k in ('tm', 't0', 'orig', 'hist')):
-            p = dict({k: v for k, v in p.items() if k not in ('tm', 't0', 'orig', 'hist')}, edited='orig' in p, undo=len(p.get('hist') or []))
+        if any(k in p for k in ('tm', 't0', 'orig', 'hist', 'man', 'okseg')):
+            p = dict({k: v for k, v in p.items() if k not in ('tm', 't0', 'orig', 'hist', 'man', 'okseg')}, edited='orig' in p, undo=len(p.get('hist') or []))
         if ts:
             ti = classify.time_info(p['pts'], ts)
             if ti: p = dict(p, tinfo=dict(start=classify.hm(ti['start'], tz), end=classify.hm(ti['end'], tz), move=ti['move'], date=_local_date(ti['start'], tz),
@@ -461,7 +461,7 @@ class H(BaseHTTPRequestHandler):
         if ctype.startswith('text/') or ctype in ('application/javascript',): ctype += '; charset=utf-8'
         with open(p, 'rb') as f: data = f.read()
         if rel == 'index.html':
-            v = int(max(os.path.getmtime(os.path.join(WEB, n)) for n in ('app.js', 'style.css', 'index.html')))
+            v = int(max(os.path.getmtime(os.path.join(WEB, n)) for n in ('app.js', 'editor.js', 'style.css', 'index.html')))
             data = data.replace(b'__V__', str(v).encode())
         self.send(200, data, ctype, cache='no-store' if rel == 'index.html' else ('public, max-age=31536000' if 'v' in q else 'public, max-age=604800'))
 
@@ -635,8 +635,9 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, dict(project=for_client(proj), **r))
             if sub == 'check' and m == 'GET':      # что не так с треком: выбросы, разрывы
                 return self.send(200, dict(items=trackfix.check(proj)))
-            if sub == 'track-edit' and m == 'POST':      # вырезать выброс, перерисовать участок, отменить, вернуть как было
-                r = trackfix.edit(proj, self.json())
+            if sub == 'track-edit' and m == 'POST':      # вырезать выброс, перерисовать участок, отменить, вернуть как было; из редактора — кусок целиком
+                d = self.json()
+                r = trackfix.replace(proj, d) if d.get('action') == 'replace' else trackfix.accept(proj, d) if d.get('action') == 'ok' else trackfix.edit(proj, d)
                 if r['ok']: save_project(pid, uid, proj)
                 return self.send(200, dict(project=for_client(proj), **r))
             if sub == 'route' and m == 'GET':      # путь по тропам между двумя точками (BRouter) — для перерисовки и вариантов
