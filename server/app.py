@@ -397,9 +397,11 @@ class H(BaseHTTPRequestHandler):
         if self.command != 'HEAD': self.wfile.write(body)
 
     def body(self):
+        if self._body is not None: return self._body
         n = int(self.headers.get('Content-Length') or 0)
-        if n > MAX_BODY: raise Err(413, 'Файл больше 45 МБ — разбейте его на части или заархивируйте.')
-        return self.rfile.read(n) if n else b''
+        if n > MAX_BODY: self.close_connection = True; raise Err(413, 'Файл больше 45 МБ — разбейте его на части или заархивируйте.')
+        self._body = self.rfile.read(n) if n else b''
+        return self._body
 
     def json(self):
         try: return json.loads(self.body() or b'{}')
@@ -435,6 +437,7 @@ class H(BaseHTTPRequestHandler):
         return uid, proj, row
 
     def handle_one(self):
+        self._body = None
         try:
             u = urllib.parse.urlsplit(self.path); path = urllib.parse.unquote(u.path); q = dict(urllib.parse.parse_qsl(u.query))
             self.route(self.command if self.command != 'HEAD' else 'GET', path, q)
@@ -446,6 +449,14 @@ class H(BaseHTTPRequestHandler):
             import traceback; traceback.print_exc()
             try: self.send(500, dict(error='Что-то сломалось на сервере. Попробуйте ещё раз.'))
             except Exception: pass
+        finally:
+            # тело, которое обработчик не прочитал (ошибка, пустой {}), иначе склеится со следующим запросом в том же соединении
+            if self._body is None and not self.close_connection:
+                try:
+                    n = int(self.headers.get('Content-Length') or 0)
+                    if 0 < n <= MAX_BODY: self.rfile.read(n)
+                    elif n: self.close_connection = True
+                except Exception: self.close_connection = True
     do_GET = do_POST = do_PUT = do_DELETE = do_HEAD = handle_one
 
     # ---- маршруты
